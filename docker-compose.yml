@@ -1,20 +1,41 @@
 services:
   calproxy:
-    build: .
+    image: ghcr.io/chr0mx/calproxy:latest
     container_name: calproxy
     restart: unless-stopped
-    # Change host port (left side) as needed; container port is always 3000.
+
+    # ── Ports ─────────────────────────────────────────────────────────────────
+    # Format: "HOST_PORT:3000" — only change the left side.
     ports:
       - "3456:3000"
+
+    # ── Environment variables ─────────────────────────────────────────────────
     environment:
-      - PORT=3000
-      - ADMIN_PASSWORD=changeme        # ← change this
-      - DATA_FILE=/data/sources.json
-      - CACHE_TTL=300
+      # Port the app listens on inside the container (matches the right side of ports above).
+      PORT: 3000
+
+      # Password for the admin UI and API (any username is accepted).
+      ADMIN_PASSWORD: changeme
+
+      # Where sources are persisted inside the container.
+      # The directory must be inside the volume mount below.
+      DATA_FILE: /data/sources.json
+
+      # How long upstream feeds are cached in seconds.
+      # 300 = 5 minutes. Increase to reduce upstream load.
+      CACHE_TTL: 300
+
+    # ── Volumes ───────────────────────────────────────────────────────────────
+    # Persist sources across container restarts/upgrades.
     volumes:
       - calproxy_data:/data
+
+    # ── Networks ──────────────────────────────────────────────────────────────
+    # Must match your reverse proxy network (Nginx Proxy Manager default: "proxy").
     networks:
       - proxy
+
+    # ── Homepage dashboard labels (optional) ─────────────────────────────────
     labels:
       homepage.group: "Media"
       homepage.name: "CalProxy"
@@ -22,7 +43,7 @@ services:
       homepage.href: "http://calproxy:3000"
       homepage.description: "Webcal proxy for Sonarr & Radarr"
 
-      # ── Optional Traefik labels (comment out if using Nginx Proxy Manager) ──
+      # ── Traefik labels (optional — remove if using Nginx Proxy Manager) ─────
       # traefik.enable: "true"
       # traefik.http.routers.calproxy.rule: "Host(`calproxy.example.com`)"
       # traefik.http.routers.calproxy.entrypoints: "websecure"
