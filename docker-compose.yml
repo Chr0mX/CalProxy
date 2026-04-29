@@ -14,7 +14,8 @@ services:
       # Port the app listens on inside the container (matches the right side of ports above).
       PORT: 3000
 
-      # Password for the admin UI and API (any username is accepted).
+      # Admin password for the web UI. The app hashes this with bcrypt at startup;
+      # the plaintext value is never stored on disk.
       ADMIN_PASSWORD: changeme
 
       # Where sources are persisted inside the container.
@@ -25,10 +26,23 @@ services:
       # 300 = 5 minutes. Increase to reduce upstream load.
       CACHE_TTL: 300
 
+      # ── Volume permission fix (bind mounts only) ───────────────────────────
+      # If you use a host-path bind mount (e.g. ./data:/data) and the container
+      # cannot write to it, set PUID/PGID to match the UID/GID that owns the
+      # host directory:
+      #   PUID: "1000"
+      #   PGID: "1000"
+      # Named volumes (default below) do not need this — the entrypoint handles
+      # ownership automatically.
+
     # ── Volumes ───────────────────────────────────────────────────────────────
-    # Persist sources across container restarts/upgrades.
+    # Named volume (recommended): Docker manages ownership automatically.
     volumes:
       - calproxy_data:/data
+
+    # For a host-path bind mount instead, replace the line above with:
+    #   - ./data:/data
+    # and set PUID/PGID to your host user's UID/GID (run: id -u && id -g).
 
     # ── Networks ──────────────────────────────────────────────────────────────
     # Must match your reverse proxy network (Nginx Proxy Manager default: "proxy").
@@ -51,7 +65,7 @@ services:
       # traefik.http.services.calproxy.loadbalancer.server.port: "3000"
 
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/stats"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
       interval: 30s
       timeout: 5s
       retries: 3

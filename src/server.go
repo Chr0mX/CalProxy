@@ -1,6 +1,4 @@
 // CalProxy — self-hostable webcal reverse proxy for Sonarr/Radarr.
-// Chosen stack: Go — single binary, zero runtime deps, stdlib HTTP is sufficient for
-// this workload, and multi-stage Docker build produces a tiny image.
 package main
 
 import (
@@ -21,15 +19,17 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
 type config struct {
-	Port          string
-	AdminPassword string
-	DataFile      string
-	CacheTTL      int // seconds
+	Port         string
+	PasswordHash []byte
+	DataFile     string
+	CacheTTL     int
 }
 
 func loadConfig() config {
@@ -51,7 +51,75 @@ func loadConfig() config {
 	if dataFile == "" {
 		dataFile = "./data/sources.json"
 	}
-	return config{Port: port, AdminPassword: pass, DataFile: dataFile, CacheTTL: ttl}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+	if err != nil {
+		log.Fatalf("[CalProxy] FATAL: cannot hash admin password: %v", err)
+	}
+
+	return config{Port: port, PasswordHash: hash, DataFile: dataFile, CacheTTL: ttl}
+}
+
+// ── Sessions ──────────────────────────────────────────────────────────────────
+
+const sessionCookieName = "calproxy_session"
+const sessionTTL = 8 * time.Hour
+
+type sessionStore struct {
+	mu       sync.Mutex
+	sessions map[string]time.Time
+}
+
+func newSessionStore() *sessionStore {
+	s := &sessionStore{sessions: make(map[string]time.Time)}
+	go s.cleanup()
+	return s
+}
+
+func (s *sessionStore) create() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	id := hex.EncodeToString(b)
+	s.mu.Lock()
+	s.sessions[id] = time.Now().Add(sessionTTL)
+	s.mu.Unlock()
+	return id, nil
+}
+
+func (s *sessionStore) valid(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exp, ok := s.sessions[id]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(s.sessions, id)
+		return false
+	}
+	return true
+}
+
+func (s *sessionStore) revoke(id string) {
+	s.mu.Lock()
+	delete(s.sessions, id)
+	s.mu.Unlock()
+}
+
+func (s *sessionStore) cleanup() {
+	ticker := time.NewTicker(time.Hour)
+	for range ticker.C {
+		s.mu.Lock()
+		now := time.Now()
+		for id, exp := range s.sessions {
+			if now.After(exp) {
+				delete(s.sessions, id)
+			}
+		}
+		s.mu.Unlock()
+	}
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -65,7 +133,6 @@ type Source struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
-// SourcePublic is Source without upstreamUrl, used in list responses.
 type SourcePublic struct {
 	Token       string    `json:"token"`
 	Name        string    `json:"name"`
@@ -84,14 +151,34 @@ func (s Source) public() SourcePublic {
 	}
 }
 
+type MergeGroup struct {
+	Token     string    `json:"token"`
+	Name      string    `json:"name"`
+	Sources   []string  `json:"sources"` // source tokens
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// persistedData is the on-disk JSON format (v2).
+// Legacy format was a plain []Source array and is still read on load.
+type persistedData struct {
+	Sources     []Source     `json:"sources"`
+	MergeGroups []MergeGroup `json:"mergeGroups"`
+}
+
 type store struct {
-	mu       sync.RWMutex
-	sources  map[string]Source // keyed by token
-	dataFile string
+	mu          sync.RWMutex
+	sources     map[string]Source
+	mergeGroups map[string]MergeGroup
+	dataFile    string
 }
 
 func newStore(dataFile string) *store {
-	s := &store{sources: make(map[string]Source), dataFile: dataFile}
+	s := &store{
+		sources:     make(map[string]Source),
+		mergeGroups: make(map[string]MergeGroup),
+		dataFile:    dataFile,
+	}
 	s.load()
 	return s
 }
@@ -99,40 +186,71 @@ func newStore(dataFile string) *store {
 func (s *store) load() {
 	data, err := os.ReadFile(s.dataFile)
 	if err != nil {
-		// Missing file is expected on first run.
+		return // missing on first run — not an error
+	}
+
+	// Try v2 format (object with "sources" key).
+	var pd persistedData
+	if err := json.Unmarshal(data, &pd); err == nil && pd.Sources != nil {
+		for _, src := range pd.Sources {
+			s.sources[src.Token] = src
+		}
+		for _, mg := range pd.MergeGroups {
+			s.mergeGroups[mg.Token] = mg
+		}
+		log.Printf("[CalProxy] INFO: loaded %d source(s), %d merge group(s)", len(s.sources), len(s.mergeGroups))
 		return
 	}
+
+	// Fall back to v1 format (plain []Source array).
 	var list []Source
 	if err := json.Unmarshal(data, &list); err != nil {
-		log.Printf("[CalProxy] WARN: could not parse %s, starting with empty sources: %v", s.dataFile, err)
+		log.Printf("[CalProxy] WARN: cannot parse %s, starting fresh: %v", s.dataFile, err)
 		return
 	}
 	for _, src := range list {
 		s.sources[src.Token] = src
 	}
-	log.Printf("[CalProxy] loaded %d source(s) from %s", len(s.sources), s.dataFile)
+	log.Printf("[CalProxy] INFO: migrated %d source(s) from legacy format", len(s.sources))
 }
 
+// save writes atomically via a temp file → rename to prevent corruption.
 func (s *store) save() {
-	list := make([]Source, 0, len(s.sources))
+	pd := persistedData{
+		Sources:     make([]Source, 0, len(s.sources)),
+		MergeGroups: make([]MergeGroup, 0, len(s.mergeGroups)),
+	}
 	for _, src := range s.sources {
-		list = append(list, src)
+		pd.Sources = append(pd.Sources, src)
 	}
-	data, err := json.MarshalIndent(list, "", "  ")
+	for _, mg := range s.mergeGroups {
+		pd.MergeGroups = append(pd.MergeGroups, mg)
+	}
+
+	data, err := json.MarshalIndent(pd, "", "  ")
 	if err != nil {
-		log.Printf("[CalProxy] ERROR: marshal sources: %v", err)
+		log.Printf("[CalProxy] ERROR: marshal data: %v", err)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(s.dataFile), 0755); err != nil {
-		log.Printf("[CalProxy] ERROR: create data dir: %v", err)
+
+	dir := filepath.Dir(s.dataFile)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("[CalProxy] ERROR: create data dir %s: %v", dir, err)
 		return
 	}
-	if err := os.WriteFile(s.dataFile, data, 0644); err != nil {
-		log.Printf("[CalProxy] ERROR: write sources: %v", err)
+
+	tmp := s.dataFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		log.Printf("[CalProxy] ERROR: write temp file: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, s.dataFile); err != nil {
+		log.Printf("[CalProxy] ERROR: atomic rename failed: %v", err)
+		_ = os.Remove(tmp)
 	}
 }
 
-func (s *store) list() []Source {
+func (s *store) listSources() []Source {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]Source, 0, len(s.sources))
@@ -142,21 +260,21 @@ func (s *store) list() []Source {
 	return out
 }
 
-func (s *store) get(token string) (Source, bool) {
+func (s *store) getSource(token string) (Source, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	src, ok := s.sources[token]
 	return src, ok
 }
 
-func (s *store) set(src Source) {
+func (s *store) setSource(src Source) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sources[src.Token] = src
 	s.save()
 }
 
-func (s *store) delete(token string) bool {
+func (s *store) deleteSource(token string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.sources[token]; !ok {
@@ -167,18 +285,63 @@ func (s *store) delete(token string) bool {
 	return true
 }
 
-// ── Auth ──────────────────────────────────────────────────────────────────────
-
-func basicAuth(password string, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		_, pass, ok := r.BasicAuth()
-		if !ok || pass != password {
-			w.Header().Set("WWW-Authenticate", `Basic realm="CalProxy Admin"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next(w, r)
+func (s *store) listMergeGroups() []MergeGroup {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]MergeGroup, 0, len(s.mergeGroups))
+	for _, mg := range s.mergeGroups {
+		out = append(out, mg)
 	}
+	return out
+}
+
+func (s *store) getMergeGroup(token string) (MergeGroup, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	mg, ok := s.mergeGroups[token]
+	return mg, ok
+}
+
+func (s *store) setMergeGroup(mg MergeGroup) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mergeGroups[mg.Token] = mg
+	s.save()
+}
+
+func (s *store) deleteMergeGroup(token string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.mergeGroups[token]; !ok {
+		return false
+	}
+	delete(s.mergeGroups, token)
+	s.save()
+	return true
+}
+
+// ── Startup writability check ─────────────────────────────────────────────────
+
+func checkWritable(dataFile string) {
+	dir := filepath.Dir(dataFile)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Fatalf(
+			"[CalProxy] FATAL: cannot create data directory %s: %v\n"+
+				"  → Fix: ensure the parent directory is writable, or set PUID/PGID in docker-compose.yml",
+			dir, err,
+		)
+	}
+	probe := filepath.Join(dir, ".write_probe")
+	f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		log.Fatalf(
+			"[CalProxy] FATAL: data directory %s is not writable: %v\n"+
+				"  → Fix: chown -R <uid>:<gid> %s  OR set PUID/PGID in docker-compose.yml",
+			dir, err, dir,
+		)
+	}
+	f.Close()
+	_ = os.Remove(probe)
 }
 
 // ── Caching ───────────────────────────────────────────────────────────────────
@@ -235,19 +398,38 @@ func (c *cache) count() int {
 	return len(c.entries)
 }
 
-// ── iCal sanitisation ─────────────────────────────────────────────────────────
+// ── iCal ──────────────────────────────────────────────────────────────────────
 
-var prodidRe = regexp.MustCompile(`(?m)^PRODID:.*$`)
+var (
+	prodidRe  = regexp.MustCompile(`(?m)^PRODID:.*$`)
+	veventRe  = regexp.MustCompile(`(?s)BEGIN:VEVENT\r?\n.*?END:VEVENT\r?\n?`)
+)
 
 func sanitizeICal(body string) string {
 	return prodidRe.ReplaceAllString(body, "PRODID:-//CalProxy//CalProxy//EN")
+}
+
+func mergeICals(feeds []string, name string) string {
+	var sb strings.Builder
+	sb.WriteString("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//CalProxy//CalProxy//EN\r\n")
+	sb.WriteString(fmt.Sprintf("X-WR-CALNAME:%s\r\n", name))
+	for _, feed := range feeds {
+		for _, match := range veventRe.FindAllString(feed, -1) {
+			sb.WriteString(match)
+			if !strings.HasSuffix(match, "\r\n") {
+				sb.WriteString("\r\n")
+			}
+		}
+	}
+	sb.WriteString("END:VCALENDAR\r\n")
+	return sb.String()
 }
 
 // ── Upstream fetch ────────────────────────────────────────────────────────────
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
-func fetchUpstream(src Source, etag string) (body string, newEtag string, notModified bool, err error) {
+func fetchUpstream(src Source, etag string) (body, newEtag string, notModified bool, err error) {
 	req, err := http.NewRequest(http.MethodGet, src.UpstreamURL, nil)
 	if err != nil {
 		return "", "", false, err
@@ -255,7 +437,6 @@ func fetchUpstream(src Source, etag string) (body string, newEtag string, notMod
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
-
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", "", false, err
@@ -268,7 +449,6 @@ func fetchUpstream(src Source, etag string) (body string, newEtag string, notMod
 	if resp.StatusCode != http.StatusOK {
 		return "", "", false, fmt.Errorf("upstream returned %d", resp.StatusCode)
 	}
-
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", "", false, err
@@ -292,44 +472,127 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func tokenFromPath(r *http.Request, prefix string) string {
-	return strings.TrimPrefix(r.URL.Path, prefix)
-}
-
 // ── Server ────────────────────────────────────────────────────────────────────
 
 type server struct {
-	cfg   config
-	db    *store
-	cache *cache
+	cfg      config
+	db       *store
+	cache    *cache
+	sessions *sessionStore
 }
 
 func newServer(cfg config) *server {
 	return &server{
-		cfg:   cfg,
-		db:    newStore(cfg.DataFile),
-		cache: newCache(cfg.CacheTTL),
+		cfg:      cfg,
+		db:       newStore(cfg.DataFile),
+		cache:    newCache(cfg.CacheTTL),
+		sessions: newSessionStore(),
+	}
+}
+
+func (s *server) isAuthenticated(r *http.Request) bool {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return false
+	}
+	return s.sessions.valid(cookie.Value)
+}
+
+func (s *server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.isAuthenticated(r) {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		next(w, r)
 	}
 }
 
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	// Public calendar endpoint.
+	// Public endpoints — no auth required.
 	mux.HandleFunc("/cal/", s.handleCal)
+	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/login", s.handleLogin)
+	mux.HandleFunc("/logout", s.handleLogout)
 
-	// Admin UI — basic auth protected.
-	mux.HandleFunc("/", basicAuth(s.cfg.AdminPassword, s.handleUI))
+	// Admin UI — session auth required.
+	mux.HandleFunc("/", s.requireAuth(s.handleUI))
 
-	// Admin API — basic auth protected.
-	mux.HandleFunc("/api/sources", basicAuth(s.cfg.AdminPassword, s.handleSources))
-	mux.HandleFunc("/api/sources/", basicAuth(s.cfg.AdminPassword, s.handleSourcesToken))
-	mux.HandleFunc("/api/stats", basicAuth(s.cfg.AdminPassword, s.handleStats))
+	// Admin API — session auth required.
+	mux.HandleFunc("/api/sources", s.requireAuth(s.handleSources))
+	mux.HandleFunc("/api/sources/", s.requireAuth(s.handleSourcesToken))
+	mux.HandleFunc("/api/merges", s.requireAuth(s.handleMerges))
+	mux.HandleFunc("/api/merges/", s.requireAuth(s.handleMergesToken))
+	mux.HandleFunc("/api/stats", s.requireAuth(s.handleStats))
 
 	return mux
 }
 
+// ── Auth routes ───────────────────────────────────────────────────────────────
+
+func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if s.isAuthenticated(r) {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		http.ServeFile(w, r, "public/login.html")
+	case http.MethodPost:
+		if err := r.ParseForm(); err != nil {
+			http.Redirect(w, r, "/login?error=1", http.StatusFound)
+			return
+		}
+		password := r.FormValue("password")
+		if err := bcrypt.CompareHashAndPassword(s.cfg.PasswordHash, []byte(password)); err != nil {
+			log.Printf("[CalProxy] WARN: failed login attempt from %s", r.RemoteAddr)
+			http.Redirect(w, r, "/login?error=1", http.StatusFound)
+			return
+		}
+		sid, err := s.sessions.create()
+		if err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     sessionCookieName,
+			Value:    sid,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   int(sessionTTL.Seconds()),
+		})
+		log.Printf("[CalProxy] INFO: admin logged in from %s", r.RemoteAddr)
+		http.Redirect(w, r, "/", http.StatusFound)
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(sessionCookieName); err == nil {
+		s.sessions.revoke(cookie.Value)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:   sessionCookieName,
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	})
+	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
 // ── Public routes ─────────────────────────────────────────────────────────────
+
+func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
 
 func (s *server) handleCal(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -342,19 +605,27 @@ func (s *server) handleCal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	src, ok := s.db.get(token)
+	// Merge groups take priority (a merge token must not collide with a source token).
+	if mg, ok := s.db.getMergeGroup(token); ok {
+		if !mg.Enabled {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveMerge(w, mg)
+		return
+	}
+
+	src, ok := s.db.getSource(token)
 	if !ok || !src.Enabled {
 		http.NotFound(w, r)
 		return
 	}
 
-	// Try fresh cache first.
 	if entry, fresh := s.cache.fresh(token); fresh {
 		serveICal(w, src.Name, s.cfg.CacheTTL, entry.data)
 		return
 	}
 
-	// Fetch from upstream; use ETag if we have a stale entry.
 	stale, hasStale := s.cache.get(token)
 	var storedEtag string
 	if hasStale {
@@ -363,9 +634,8 @@ func (s *server) handleCal(w http.ResponseWriter, r *http.Request) {
 
 	body, newEtag, notModified, err := fetchUpstream(src, storedEtag)
 	if err != nil {
-		log.Printf("[CalProxy] upstream error for token %s: %v", token, err)
+		log.Printf("[CalProxy] WARN: upstream error for token %s: %v", token, err)
 		if hasStale {
-			log.Printf("[CalProxy] serving stale cache for token %s", token)
 			serveICal(w, src.Name, s.cfg.CacheTTL, stale.data)
 			return
 		}
@@ -374,7 +644,6 @@ func (s *server) handleCal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if notModified {
-		// Upstream confirmed our cached copy is still valid — refresh timestamp.
 		s.cache.set(token, cacheEntry{data: stale.data, etag: storedEtag, fetchedAt: time.Now()})
 		serveICal(w, src.Name, s.cfg.CacheTTL, stale.data)
 		return
@@ -383,6 +652,50 @@ func (s *server) handleCal(w http.ResponseWriter, r *http.Request) {
 	sanitized := sanitizeICal(body)
 	s.cache.set(token, cacheEntry{data: sanitized, etag: newEtag, fetchedAt: time.Now()})
 	serveICal(w, src.Name, s.cfg.CacheTTL, sanitized)
+}
+
+func (s *server) serveMerge(w http.ResponseWriter, mg MergeGroup) {
+	if entry, fresh := s.cache.fresh(mg.Token); fresh {
+		serveICal(w, mg.Name, s.cfg.CacheTTL, entry.data)
+		return
+	}
+
+	var feeds []string
+	for _, srcToken := range mg.Sources {
+		src, ok := s.db.getSource(srcToken)
+		if !ok || !src.Enabled {
+			continue
+		}
+		if entry, fresh := s.cache.fresh(srcToken); fresh {
+			feeds = append(feeds, entry.data)
+			continue
+		}
+		stale, hasStale := s.cache.get(srcToken)
+		var etag string
+		if hasStale {
+			etag = stale.etag
+		}
+		body, newEtag, notModified, err := fetchUpstream(src, etag)
+		if err != nil {
+			log.Printf("[CalProxy] WARN: upstream error for source %s in merge %s: %v", srcToken, mg.Token, err)
+			if hasStale {
+				feeds = append(feeds, stale.data)
+			}
+			continue
+		}
+		if notModified {
+			s.cache.set(srcToken, cacheEntry{data: stale.data, etag: etag, fetchedAt: time.Now()})
+			feeds = append(feeds, stale.data)
+		} else {
+			sanitized := sanitizeICal(body)
+			s.cache.set(srcToken, cacheEntry{data: sanitized, etag: newEtag, fetchedAt: time.Now()})
+			feeds = append(feeds, sanitized)
+		}
+	}
+
+	merged := mergeICals(feeds, mg.Name)
+	s.cache.set(mg.Token, cacheEntry{data: merged, fetchedAt: time.Now()})
+	serveICal(w, mg.Name, s.cfg.CacheTTL, merged)
 }
 
 func serveICal(w http.ResponseWriter, name string, ttl int, body string) {
@@ -394,11 +707,10 @@ func serveICal(w http.ResponseWriter, name string, ttl int, body string) {
 
 // ── Admin routes ──────────────────────────────────────────────────────────────
 
-// handleSources handles /api/sources (GET list, POST create).
 func (s *server) handleSources(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		all := s.db.list()
+		all := s.db.listSources()
 		pub := make([]SourcePublic, 0, len(all))
 		for _, src := range all {
 			pub = append(pub, src.public())
@@ -437,8 +749,8 @@ func (s *server) handleSources(w http.ResponseWriter, r *http.Request) {
 			Enabled:     enabled,
 			CreatedAt:   time.Now().UTC(),
 		}
-		s.db.set(src)
-		log.Printf("[CalProxy] created source %q (token %s)", src.Name, src.Token)
+		s.db.setSource(src)
+		log.Printf("[CalProxy] INFO: created source %q (token %s)", src.Name, src.Token)
 		writeJSON(w, http.StatusCreated, src)
 
 	default:
@@ -446,23 +758,21 @@ func (s *server) handleSources(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleSourcesToken handles /api/sources/:token and sub-paths.
 func (s *server) handleSourcesToken(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/sources/")
 
-	// POST /api/sources/:token/refresh
 	if strings.HasSuffix(rest, "/refresh") {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		token := strings.TrimSuffix(rest, "/refresh")
-		if _, ok := s.db.get(token); !ok {
+		if _, ok := s.db.getSource(token); !ok {
 			http.NotFound(w, r)
 			return
 		}
 		s.cache.evict(token)
-		log.Printf("[CalProxy] cache purged for token %s", token)
+		log.Printf("[CalProxy] INFO: cache purged for token %s", token)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
@@ -470,7 +780,7 @@ func (s *server) handleSourcesToken(w http.ResponseWriter, r *http.Request) {
 	token := rest
 	switch r.Method {
 	case http.MethodGet:
-		src, ok := s.db.get(token)
+		src, ok := s.db.getSource(token)
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -478,7 +788,7 @@ func (s *server) handleSourcesToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, src)
 
 	case http.MethodPut:
-		src, ok := s.db.get(token)
+		src, ok := s.db.getSource(token)
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -505,18 +815,119 @@ func (s *server) handleSourcesToken(w http.ResponseWriter, r *http.Request) {
 		if body.Enabled != nil {
 			src.Enabled = *body.Enabled
 		}
-		s.db.set(src)
-		s.cache.evict(token) // invalidate after update
-		log.Printf("[CalProxy] updated source %s", token)
+		s.db.setSource(src)
+		s.cache.evict(token)
+		log.Printf("[CalProxy] INFO: updated source %s", token)
 		writeJSON(w, http.StatusOK, src)
 
 	case http.MethodDelete:
-		if !s.db.delete(token) {
+		if !s.db.deleteSource(token) {
 			http.NotFound(w, r)
 			return
 		}
 		s.cache.evict(token)
-		log.Printf("[CalProxy] deleted source %s", token)
+		log.Printf("[CalProxy] INFO: deleted source %s", token)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *server) handleMerges(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.db.listMergeGroups())
+
+	case http.MethodPost:
+		var body struct {
+			Name    string   `json:"name"`
+			Sources []string `json:"sources"`
+			Enabled *bool    `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+		if body.Name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		token, err := randomToken()
+		if err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		enabled := true
+		if body.Enabled != nil {
+			enabled = *body.Enabled
+		}
+		if body.Sources == nil {
+			body.Sources = []string{}
+		}
+		mg := MergeGroup{
+			Token:     token,
+			Name:      body.Name,
+			Sources:   body.Sources,
+			Enabled:   enabled,
+			CreatedAt: time.Now().UTC(),
+		}
+		s.db.setMergeGroup(mg)
+		log.Printf("[CalProxy] INFO: created merge group %q (token %s)", mg.Name, mg.Token)
+		writeJSON(w, http.StatusCreated, mg)
+
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *server) handleMergesToken(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.URL.Path, "/api/merges/")
+	switch r.Method {
+	case http.MethodGet:
+		mg, ok := s.db.getMergeGroup(token)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, mg)
+
+	case http.MethodPut:
+		mg, ok := s.db.getMergeGroup(token)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		var body struct {
+			Name    *string  `json:"name"`
+			Sources []string `json:"sources"`
+			Enabled *bool    `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+		if body.Name != nil {
+			mg.Name = *body.Name
+		}
+		if body.Sources != nil {
+			mg.Sources = body.Sources
+		}
+		if body.Enabled != nil {
+			mg.Enabled = *body.Enabled
+		}
+		s.db.setMergeGroup(mg)
+		s.cache.evict(token)
+		log.Printf("[CalProxy] INFO: updated merge group %s", token)
+		writeJSON(w, http.StatusOK, mg)
+
+	case http.MethodDelete:
+		if !s.db.deleteMergeGroup(token) {
+			http.NotFound(w, r)
+			return
+		}
+		s.cache.evict(token)
+		log.Printf("[CalProxy] INFO: deleted merge group %s", token)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 
 	default:
@@ -530,13 +941,13 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"sources":  len(s.db.list()),
-		"cached":   s.cache.count(),
-		"cacheTtl": s.cfg.CacheTTL,
+		"sources":     len(s.db.listSources()),
+		"mergeGroups": len(s.db.listMergeGroups()),
+		"cached":      s.cache.count(),
+		"cacheTtl":    s.cfg.CacheTTL,
 	})
 }
 
-// handleUI serves the admin SPA from the embedded public/index.html.
 func (s *server) handleUI(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -548,8 +959,10 @@ func (s *server) handleUI(w http.ResponseWriter, r *http.Request) {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 func main() {
-	log.SetFlags(0) // timestamps are added by the prefix
+	log.SetFlags(0)
 	cfg := loadConfig()
+
+	checkWritable(cfg.DataFile)
 
 	srv := newServer(cfg)
 	hs := &http.Server{
@@ -560,22 +973,21 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Graceful shutdown on SIGTERM / SIGINT.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-quit
-		log.Println("[CalProxy] shutting down…")
+		log.Println("[CalProxy] INFO: shutting down…")
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := hs.Shutdown(ctx); err != nil {
-			log.Printf("[CalProxy] shutdown error: %v", err)
+			log.Printf("[CalProxy] ERROR: shutdown: %v", err)
 		}
 	}()
 
-	log.Printf("[CalProxy] listening on :%s  (TTL=%ds  data=%s)", cfg.Port, cfg.CacheTTL, cfg.DataFile)
+	log.Printf("[CalProxy] INFO: listening on :%s  (TTL=%ds  data=%s)", cfg.Port, cfg.CacheTTL, cfg.DataFile)
 	if err := hs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("[CalProxy] fatal: %v", err)
+		log.Fatalf("[CalProxy] FATAL: %v", err)
 	}
-	log.Println("[CalProxy] stopped")
+	log.Println("[CalProxy] INFO: stopped")
 }

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CalProxy — Login</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:      #0d1117;
+    --surface: #161b22;
+    --border:  #30363d;
+    --accent:  #58a6ff;
+    --danger:  #f85149;
+    --text:    #c9d1d9;
+    --muted:   #8b949e;
+    --radius:  6px;
+    --mono:    'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .login-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 32px;
+    width: 100%;
+    max-width: 360px;
+    margin: 16px;
+  }
+
+  .logo {
+    text-align: center;
+    margin-bottom: 24px;
+  }
+  .logo h1 {
+    font-size: 20px;
+    color: var(--accent);
+    letter-spacing: 0.5px;
+  }
+  .logo p {
+    color: var(--muted);
+    font-size: 11px;
+    margin-top: 4px;
+  }
+
+  label {
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 4px;
+  }
+
+  input[type=password] {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 8px 10px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  input[type=password]:focus { border-color: var(--accent); }
+
+  button[type=submit] {
+    width: 100%;
+    margin-top: 16px;
+    padding: 9px;
+    background: var(--accent);
+    color: #0d1117;
+    border: none;
+    border-radius: var(--radius);
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button[type=submit]:hover { background: #79c0ff; }
+
+  .error {
+    background: rgba(248,81,73,0.1);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius);
+    color: var(--danger);
+    font-size: 12px;
+    padding: 8px 12px;
+    margin-bottom: 16px;
+    display: none;
+  }
+  .error.show { display: block; }
+</style>
+</head>
+<body>
+
+<div class="login-box">
+  <div class="logo">
+    <h1>&#x1F4C5; CalProxy</h1>
+    <p>webcal reverse proxy</p>
+  </div>
+
+  <div class="error" id="errMsg">Incorrect password. Please try again.</div>
+
+  <form method="POST" action="/login">
+    <label for="password">Admin Password</label>
+    <input type="password" id="password" name="password" autofocus autocomplete="current-password" placeholder="••••••••">
+    <button type="submit">Sign In</button>
+  </form>
+</div>
+
+<script>
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('error')) {
+    document.getElementById('errMsg').classList.add('show');
+    document.getElementById('password').focus();
+  }
+</script>
+</body>
+</html>
