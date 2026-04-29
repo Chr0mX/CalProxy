@@ -14,12 +14,31 @@ http://sonarr:8989/feed/...?apikey=SECRET   ← never sent to clients
 
 ## Quick start
 
+### Option A — pre-built image (recommended)
+
+```bash
+# 1. Download the compose file
+curl -O https://raw.githubusercontent.com/chr0mx/calproxy/main/docker-compose.yml
+
+# 2. Set your admin password
+#    Linux/macOS:
+sed -i 's/ADMIN_PASSWORD: changeme/ADMIN_PASSWORD: yourpassword/' docker-compose.yml
+#    Or just open the file and edit ADMIN_PASSWORD manually.
+
+# 3. Start
+docker compose up -d
+```
+
+The image is pulled automatically from `ghcr.io/chr0mx/calproxy:latest`.  
+To pin to a specific release use a tag instead: `ghcr.io/chr0mx/calproxy:1.0.0`.
+
+### Option B — build from source
+
 ```bash
 git clone https://github.com/chr0mx/calproxy
 cd calproxy
-
-# Edit ADMIN_PASSWORD before running!
-docker compose up -d
+# Replace the image: line with build: . in docker-compose.yml, then:
+docker compose up -d --build
 ```
 
 Open `http://your-host:3456` and log in with any username and the password you set.
