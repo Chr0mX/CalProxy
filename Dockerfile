@@ -12,16 +12,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o calproxy ./src/
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM alpine:3.19
 
-RUN addgroup -S calproxy && adduser -S -G calproxy calproxy
+# su-exec: tiny setuid helper to drop from root to calproxy after fixing
+# bind-mount ownership in the entrypoint.
+RUN apk add --no-cache su-exec \
+ && addgroup -S calproxy && adduser -S -G calproxy calproxy
 
 WORKDIR /app
 
 COPY --from=builder /build/calproxy .
 COPY public/ ./public/
-
-RUN mkdir -p /data && chown calproxy:calproxy /data
-
-USER calproxy
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
 
 EXPOSE 3000
 
@@ -30,4 +31,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
 
 ENV DATA_FILE=/data/sources.json
 
-ENTRYPOINT ["./calproxy"]
+# Entrypoint runs as root only long enough to mkdir + chown the data dir,
+# then drops to the calproxy user via su-exec.
+ENTRYPOINT ["./entrypoint.sh"]
