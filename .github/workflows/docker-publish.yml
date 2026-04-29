@@ -23,41 +23,77 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        run: |
+          git clone "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" .
+          git checkout "${{ github.sha }}"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        run: |
+          docker buildx create --use --name builder --driver docker-container
+          docker buildx inspect --bootstrap
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            docker login ghcr.io --username "${{ github.actor }}" --password-stdin
 
-      - name: Extract metadata
+      - name: Compute image tags and labels
         id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            # Push :latest on every main branch push
-            type=raw,value=latest,enable={{is_default_branch}}
-            # Semantic version tags from git tags: v1.2.3 → 1.2.3, 1.2, 1
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            # Short SHA for traceability
-            type=sha,prefix=sha-,format=short
+        run: |
+          IMAGE="ghcr.io/${IMAGE_NAME,,}"   # lowercase required by ghcr.io
+          REF="${{ github.ref }}"
+          SHA="${{ github.sha }}"
+          SHORT_SHA="${SHA:0:7}"
+
+          TAGS="${IMAGE}:sha-${SHORT_SHA}"
+
+          # :latest on default branch
+          if [[ "$REF" == "refs/heads/main" ]]; then
+            TAGS="${TAGS},${IMAGE}:latest"
+          fi
+
+          # semver tags from git tag (v1.2.3 → 1, 1.2, 1.2.3)
+          if [[ "$REF" == refs/tags/v* ]]; then
+            VERSION="${REF#refs/tags/v}"
+            MAJOR="${VERSION%%.*}"
+            MINOR="${VERSION%.*}"
+            TAGS="${TAGS},${IMAGE}:${VERSION},${IMAGE}:${MINOR},${IMAGE}:${MAJOR}"
+          fi
+
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+          # OCI standard labels
+          echo "labels<<EOF" >> "$GITHUB_OUTPUT"
+          echo "org.opencontainers.image.source=https://github.com/${{ github.repository }}" >> "$GITHUB_OUTPUT"
+          echo "org.opencontainers.image.revision=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
 
       - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        run: |
+          PUSH_FLAG="--load"
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            PUSH_FLAG="--push"
+          fi
+
+          # Convert comma-separated tags to repeated --tag flags
+          TAG_FLAGS=""
+          IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
+          for t in "${TAG_ARRAY[@]}"; do
+            TAG_FLAGS="${TAG_FLAGS} --tag ${t}"
+          done
+
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            ${PUSH_FLAG} \
+            ${TAG_FLAGS} \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --cache-from "type=registry,ref=${{ steps.meta.outputs.image }}:buildcache" \
+            --cache-to   "type=registry,ref=${{ steps.meta.outputs.image }}:buildcache,mode=max" \
+            .
