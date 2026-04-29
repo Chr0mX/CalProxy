@@ -1,0 +1,45 @@
+services:
+  calproxy:
+    build: .
+    container_name: calproxy
+    restart: unless-stopped
+    # Change host port (left side) as needed; container port is always 3000.
+    ports:
+      - "3456:3000"
+    environment:
+      - PORT=3000
+      - ADMIN_PASSWORD=changeme        # ← change this
+      - DATA_FILE=/data/sources.json
+      - CACHE_TTL=300
+    volumes:
+      - calproxy_data:/data
+    networks:
+      - proxy
+    labels:
+      homepage.group: "Media"
+      homepage.name: "CalProxy"
+      homepage.icon: "calendar"
+      homepage.href: "http://calproxy:3000"
+      homepage.description: "Webcal proxy for Sonarr & Radarr"
+
+      # ── Optional Traefik labels (comment out if using Nginx Proxy Manager) ──
+      # traefik.enable: "true"
+      # traefik.http.routers.calproxy.rule: "Host(`calproxy.example.com`)"
+      # traefik.http.routers.calproxy.entrypoints: "websecure"
+      # traefik.http.routers.calproxy.tls.certresolver: "letsencrypt"
+      # traefik.http.services.calproxy.loadbalancer.server.port: "3000"
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/stats"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  calproxy_data:
+    name: calproxy_data
+
+networks:
+  proxy:
+    external: true
