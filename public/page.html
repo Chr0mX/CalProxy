@@ -5,44 +5,100 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>CalProxy</title>
 <style>
-:root{--bg:#0b1020;--card:#131a2b;--txt:#e6edf7;--muted:#9aa8c1;--border:#263149;--accent:#6aa8ff;}
-@media (prefers-color-scheme:light){:root{--bg:#f4f7fb;--card:#fff;--txt:#0f172a;--muted:#52607a;--border:#d8e0ef;--accent:#2563eb;}}
+/* ── Base variables (blue theme — default) ── */
+:root{
+  --bg:#0b1020;--card:#131a2b;--txt:#e6edf7;--muted:#9aa8c1;--border:#263149;
+  --accent:#6aa8ff;--accent2:#6aa8ff;
+}
+@media (prefers-color-scheme:light){
+  :root{--bg:#f4f7fb;--card:#fff;--txt:#0f172a;--muted:#52607a;--border:#d8e0ef;
+    --accent:#2563eb;--accent2:#2563eb;}
+}
+
+/* ── Orange theme ── */
+[data-theme=orange]{--accent:#ff8c42;--accent2:#ff8c42;}
+@media (prefers-color-scheme:light){
+  [data-theme=orange]{--accent:#d95f00;--accent2:#d95f00;}
+}
+
+/* ── Gold theme ── */
+[data-theme=gold]{--accent:#f5c842;--accent2:#f5c842;}
+@media (prefers-color-scheme:light){
+  [data-theme=gold]{--accent:#b58900;--accent2:#b58900;}
+}
+
+/* ── Mixed theme (orange primary accent, blue secondary) ── */
+[data-theme=mixed]{--accent:#ff8c42;--accent2:#6aa8ff;}
+@media (prefers-color-scheme:light){
+  [data-theme=mixed]{--accent:#d95f00;--accent2:#2563eb;}
+}
+
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;}
-header{display:flex;justify-content:space-between;align-items:center;padding:18px 22px;border-bottom:1px solid var(--border);}
+
+/* ── Header ── */
+header{display:flex;justify-content:space-between;align-items:center;padding:14px 22px;border-bottom:1px solid var(--border);gap:10px;}
+.header-left{display:flex;align-items:center;gap:12px;}
+.header-right{display:flex;align-items:center;gap:8px;}
+#page-title{font-weight:700;font-size:15px;}
+.login-link{border:1px solid var(--border);padding:6px 12px;border-radius:8px;color:var(--txt);text-decoration:none;font-size:13px;}
+.login-link:hover{border-color:var(--accent);color:var(--accent);}
+
+/* ── Webcal header button ── */
+.webcal-header-btn{position:relative;display:inline-block;}
+.webcal-header-btn > button{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:5px;}
+.webcal-header-btn > button:hover{opacity:0.85;}
+.webcal-drop{display:none;position:absolute;top:calc(100% + 6px);right:0;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:8px;min-width:220px;z-index:100;box-shadow:0 6px 20px rgba(0,0,0,.25);}
+.webcal-drop.open{display:block;}
+.webcal-drop-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 8px;border-radius:6px;}
+.webcal-drop-item:hover{background:var(--bg);}
+.webcal-drop-item-name{font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.webcal-drop-item-desc{font-size:11px;color:var(--muted);}
+.webcal-drop-link{background:var(--accent);color:#fff;border:none;border-radius:5px;padding:4px 9px;font-size:11px;cursor:pointer;text-decoration:none;white-space:nowrap;}
+.webcal-drop-link:hover{opacity:0.85;}
+
+/* ── Main container ── */
 .container{max-width:980px;width:100%;margin:auto;padding:20px;flex:1;}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px;}
-.login-link{border:1px solid var(--border);padding:8px 12px;border-radius:10px;color:var(--txt);text-decoration:none;}
-.login-link:hover{border-color:var(--accent);color:var(--accent);}
-/* Webcal sources */
-.sources-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;}
-.source-chip{display:flex;align-items:center;gap:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;}
-.source-name{font-weight:500;}
-.source-desc{font-size:12px;color:var(--muted);}
-.webcal-btn{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;text-decoration:none;white-space:nowrap;line-height:1.6;}
-.webcal-btn:hover{opacity:0.85;}
-/* Calendar events */
+
+/* ── Calendar events ── */
 .group{margin-top:18px;}
 .date{font-weight:700;margin:12px 0 8px;color:var(--accent);}
 .item{display:flex;justify-content:space-between;padding:9px 10px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;gap:10px;}
 .source-tag{color:var(--muted);white-space:nowrap;}
 .empty{color:var(--muted);}
-/* Footer */
+
+/* ── Footer ── */
 footer{border-top:1px solid var(--border);padding:12px 22px;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);flex-shrink:0;}
 footer a{color:var(--muted);text-decoration:none;}
 footer a:hover{color:var(--accent);}
+
+/* ── Theme switcher (bottom-left fixed) ── */
+.theme-switcher{position:fixed;bottom:16px;left:16px;z-index:200;}
+.theme-switcher-toggle{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:6px 10px;font-size:11px;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:5px;}
+.theme-switcher-toggle:hover{border-color:var(--accent);color:var(--txt);}
+.theme-switcher-panel{display:none;position:absolute;bottom:calc(100% + 6px);left:0;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:6px;box-shadow:0 6px 20px rgba(0,0,0,.25);}
+.theme-switcher-panel.open{display:block;}
+.theme-opt{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:7px;cursor:pointer;font-size:12px;white-space:nowrap;}
+.theme-opt:hover{background:var(--bg);}
+.theme-opt.active{color:var(--accent);font-weight:600;}
+.theme-swatch{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
 </style>
 </head>
 <body>
 <header>
-  <strong id="page-title">CalProxy</strong>
-  <a class="login-link" href="/login">Login</a>
+  <div class="header-left">
+    <strong id="page-title">CalProxy</strong>
+  </div>
+  <div class="header-right">
+    <div class="webcal-header-btn" id="webcalHeaderBtn" style="display:none">
+      <button onclick="toggleWebcalDrop(event)" title="Subscribe in calendar app">&#128197; Subscribe</button>
+      <div class="webcal-drop" id="webcalDrop"></div>
+    </div>
+    <a class="login-link" href="/login">Login</a>
+  </div>
 </header>
 <div class="container">
-  <div id="sources-card" class="card" style="display:none">
-    <strong>Calendars</strong>
-    <div id="sources-list" class="sources-list"></div>
-  </div>
   <div class="card">
     <h2 style="margin:0 0 8px">Upcoming Events</h2>
     <div id="calendar" class="empty">Loading events…</div>
@@ -52,6 +108,18 @@ footer a:hover{color:var(--accent);}
   <a href="https://github.com/Chr0mX/CalProxy" target="_blank" rel="noopener noreferrer">CalProxy on GitHub</a>
   <span id="version-info"></span>
 </footer>
+
+<!-- Theme switcher — bottom-left -->
+<div class="theme-switcher" id="themeSwitcher" style="display:none">
+  <button class="theme-switcher-toggle" onclick="toggleThemePanel(event)">&#9680; Theme</button>
+  <div class="theme-switcher-panel" id="themePanel">
+    <div class="theme-opt" data-theme="blue"   onclick="setTheme('blue')">  <span class="theme-swatch" style="background:#6aa8ff"></span>Blue</div>
+    <div class="theme-opt" data-theme="orange" onclick="setTheme('orange')"><span class="theme-swatch" style="background:#ff8c42"></span>Orange</div>
+    <div class="theme-opt" data-theme="gold"   onclick="setTheme('gold')">  <span class="theme-swatch" style="background:#f5c842"></span>Gold</div>
+    <div class="theme-opt" data-theme="mixed"  onclick="setTheme('mixed')"> <span class="theme-swatch" style="background:linear-gradient(135deg,#ff8c42 50%,#6aa8ff 50%)"></span>Mixed</div>
+  </div>
+</div>
+
 <script>
 (async function () {
   const slug = window.location.pathname.replace(/^\/+/, '') || '';
@@ -75,22 +143,38 @@ footer a:hover{color:var(--accent);}
     document.getElementById('version-info').textContent = data.version;
   }
 
-  // Webcal source chips
+  // Theme: localStorage wins; fall back to server-configured theme, then default (blue)
+  const storedTheme = localStorage.getItem('calproxy-theme');
+  const serverTheme = data.theme || '';
+  applyTheme(storedTheme || serverTheme || 'blue');
+  document.getElementById('themeSwitcher').style.display = '';
+
+  // Webcal button in top bar
   if (data.show_webcal && Array.isArray(data.sources) && data.sources.length) {
-    const card = document.getElementById('sources-card');
-    const list = document.getElementById('sources-list');
-    card.style.display = '';
-    data.sources.forEach(function (src) {
-      const webcalUrl = 'webcal://' + window.location.host + '/cal/' + src.token;
-      const chip = document.createElement('div');
-      chip.className = 'source-chip';
-      chip.innerHTML =
-        '<div><div class="source-name">' + esc(src.name) + '</div>' +
-        (src.description ? '<div class="source-desc">' + esc(src.description) + '</div>' : '') +
-        '</div>' +
-        '<a class="webcal-btn" href="' + webcalUrl + '">Open in Webcal</a>';
-      list.appendChild(chip);
-    });
+    const btn = document.getElementById('webcalHeaderBtn');
+    const drop = document.getElementById('webcalDrop');
+    btn.style.display = '';
+
+    if (data.sources.length === 1) {
+      // Single source: direct link on the button
+      const src = data.sources[0];
+      const url = 'webcal://' + window.location.host + '/cal/' + src.token;
+      const b = btn.querySelector('button');
+      b.onclick = null;
+      b.addEventListener('click', function () { window.location.href = url; });
+      drop.parentElement.querySelector('.webcal-drop').remove();
+    } else {
+      // Multiple sources: dropdown
+      drop.innerHTML = data.sources.map(function (src) {
+        const url = 'webcal://' + window.location.host + '/cal/' + src.token;
+        return '<div class="webcal-drop-item">' +
+          '<div><div class="webcal-drop-item-name">' + esc(src.name) + '</div>' +
+          (src.description ? '<div class="webcal-drop-item-desc">' + esc(src.description) + '</div>' : '') +
+          '</div>' +
+          '<a class="webcal-drop-link" href="' + url + '">Subscribe</a>' +
+          '</div>';
+      }).join('');
+    }
   }
 
   // Events
@@ -120,10 +204,50 @@ footer a:hover{color:var(--accent);}
     calRoot.appendChild(g);
   });
 
+  // ── Theme helpers ──────────────────────────────────────────────────────────
+
+  function applyTheme(t) {
+    const valid = ['blue', 'orange', 'gold', 'mixed'];
+    t = valid.includes(t) ? t : 'blue';
+    document.documentElement.dataset.theme = t === 'blue' ? '' : t;
+    document.querySelectorAll('.theme-opt').forEach(function (el) {
+      el.classList.toggle('active', el.dataset.theme === t);
+    });
+  }
+
   function esc(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
+
+  // expose to onclick handlers in the static HTML
+  window._applyTheme = applyTheme;
 })();
+
+function setTheme(t) {
+  localStorage.setItem('calproxy-theme', t);
+  if (window._applyTheme) window._applyTheme(t);
+  document.getElementById('themePanel').classList.remove('open');
+}
+
+function toggleThemePanel(e) {
+  e.stopPropagation();
+  document.getElementById('themePanel').classList.toggle('open');
+  document.getElementById('webcalDrop') && document.getElementById('webcalDrop').classList.remove('open');
+}
+
+function toggleWebcalDrop(e) {
+  e.stopPropagation();
+  document.getElementById('webcalDrop').classList.toggle('open');
+  document.getElementById('themePanel').classList.remove('open');
+}
+
+// Close dropdowns on outside click
+document.addEventListener('click', function () {
+  var d = document.getElementById('webcalDrop');
+  var p = document.getElementById('themePanel');
+  if (d) d.classList.remove('open');
+  if (p) p.classList.remove('open');
+});
 </script>
 </body>
 </html>

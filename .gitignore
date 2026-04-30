@@ -1,0 +1,9 @@
+# Build output
+src/src
+/calproxy
+
+# Data directory (runtime state)
+data/
+
+# Temp files
+*.tmp
