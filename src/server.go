@@ -1220,7 +1220,9 @@ func (s *server) sonarrSeriesPosterURL(src Source, seriesID int) (string, error)
 	return "", fmt.Errorf("no poster found for sonarr series %d", seriesID)
 }
 
-// radarrMoviePosterURL returns the internal poster URL for a Radarr movie (cached).
+// radarrMoviePosterURL returns the MediaCover API URL for a Radarr movie poster (cached).
+// It prefers poster.jpg via the MediaCover API; falls back to the first available
+// cover derived from the movie API when poster.jpg is not present.
 func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 	key := fmt.Sprintf("radarr_movie_poster_%d", movieID)
 	if v, ok := s.meta.get(key); ok {
@@ -1230,6 +1232,23 @@ func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 	if baseURL == "" || apiKey == "" {
 		return "", fmt.Errorf("cannot extract API credentials from source %s", src.Token)
 	}
+
+	// Prefer poster.jpg directly via the MediaCover API (HEAD to verify existence).
+	posterURL := fmt.Sprintf("%s/api/v3/mediacover/%d/poster.jpg", baseURL, movieID)
+	headReq, err := http.NewRequest(http.MethodHead, posterURL, nil)
+	if err == nil {
+		headReq.Header.Set("X-Api-Key", apiKey)
+		if headResp, herr := httpClient.Do(headReq); herr == nil {
+			headResp.Body.Close()
+			if headResp.StatusCode == http.StatusOK {
+				s.meta.set(key, posterURL)
+				return posterURL, nil
+			}
+		}
+	}
+
+	// Fallback: query movie API for available covers and build a MediaCover URL
+	// from the filename, preferring cover type "poster" then any first cover.
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v3/movie/%d", baseURL, movieID), nil)
 	if err != nil {
 		return "", err
@@ -1247,26 +1266,32 @@ func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 		Images []struct {
 			CoverType string `json:"coverType"`
 			URL       string `json:"url"`
-			RemoteURL string `json:"remoteUrl"`
 		} `json:"images"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", err
 	}
+	var firstCoverURL string
 	for _, img := range result.Images {
+		parts := strings.Split(img.URL, "/")
+		filename := parts[len(parts)-1]
+		if filename == "" {
+			continue
+		}
+		coverURL := fmt.Sprintf("%s/api/v3/mediacover/%d/%s", baseURL, movieID, filename)
 		if img.CoverType == "poster" {
-			posterURL := img.URL
-			if posterURL == "" {
-				posterURL = img.RemoteURL
-			}
-			if strings.HasPrefix(posterURL, "/") {
-				posterURL = baseURL + posterURL
-			}
-			s.meta.set(key, posterURL)
-			return posterURL, nil
+			s.meta.set(key, coverURL)
+			return coverURL, nil
+		}
+		if firstCoverURL == "" {
+			firstCoverURL = coverURL
 		}
 	}
-	return "", fmt.Errorf("no poster found for radarr movie %d", movieID)
+	if firstCoverURL != "" {
+		s.meta.set(key, firstCoverURL)
+		return firstCoverURL, nil
+	}
+	return "", fmt.Errorf("no cover found for radarr movie %d", movieID)
 }
 
 // proxyImage fetches an image from an internal URL and streams it as JPEG
