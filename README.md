@@ -29,7 +29,7 @@ sed -i 's/ADMIN_PASSWORD: changeme/ADMIN_PASSWORD: yourpassword/' docker-compose
 docker compose up -d
 ```
 
-The image is pulled automatically from `ghcr.io/chr0mx/calproxy:latest`.  
+The image is pulled automatically from `ghcr.io/chr0mx/calproxy:dev`.  
 To pin to a specific release use a tag instead: `ghcr.io/chr0mx/calproxy:1.0.0`.
 
 ### Option B — build from source
