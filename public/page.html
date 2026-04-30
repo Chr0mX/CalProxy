@@ -97,6 +97,11 @@ header{display:flex;justify-content:space-between;align-items:center;padding:14p
 .event-time{font-size:11px;color:var(--muted);}
 .source-tag{color:var(--muted);white-space:nowrap;font-size:12px;align-self:center;flex-shrink:0;}
 
+/* ARR (Sonarr/Radarr) specific layout */
+.event-episode{font-size:12px;color:var(--txt);opacity:0.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.event-se-time{font-size:11px;color:var(--muted);}
+.item.arr .event-desc{white-space:normal;word-wrap:break-word;overflow:visible;text-overflow:unset;}
+
 /* ── Hover tooltip ── */
 .item-tooltip{
   display:none;position:absolute;z-index:200;
@@ -260,18 +265,43 @@ footer a:hover{color:var(--accent);}
       // Tooltip content
       const tooltipLines = [
         '<div class="tooltip-title">' + esc(ev.title) + '</div>',
-        '<div class="tooltip-meta">' + esc(t) + ' &nbsp;·&nbsp; ' + esc(ev.source) + '</div>',
       ];
+      if (ev.isArr && ev.episode) {
+        tooltipLines.push('<div class="tooltip-meta">' + esc(ev.se || '') + (ev.se ? ' &nbsp;·&nbsp; ' : '') + esc(t) + ' &nbsp;·&nbsp; ' + esc(ev.source) + '</div>');
+        tooltipLines.push('<div class="tooltip-desc" style="color:var(--txt);opacity:0.8;font-size:11px;margin-top:2px;">' + esc(ev.episode) + '</div>');
+      } else {
+        tooltipLines.push('<div class="tooltip-meta">' + esc(t) + ' &nbsp;·&nbsp; ' + esc(ev.source) + '</div>');
+      }
       if (ev.description) {
         tooltipLines.push('<div class="tooltip-desc">' + esc(truncate(ev.description, 300)) + '</div>');
+      }
+
+      // Body layout differs for ARR sources
+      let bodyHTML;
+      if (ev.isArr) {
+        item.classList.add('arr');
+        const episodeHTML = ev.episode
+          ? '<div class="event-episode">' + esc(ev.episode) + '</div>'
+          : '';
+        const seTimeHTML = '<div class="event-se-time">' +
+          (ev.se ? esc(ev.se) + ' &nbsp;·&nbsp; ' : '') + esc(t) +
+          '</div>';
+        bodyHTML =
+          '<div class="event-title">' + esc(ev.title) + '</div>' +
+          episodeHTML +
+          descHTML +
+          seTimeHTML;
+      } else {
+        bodyHTML =
+          '<div class="event-title">' + esc(ev.title) + '</div>' +
+          descHTML +
+          '<div class="event-time">' + esc(t) + '</div>';
       }
 
       item.innerHTML =
         thumbHTML +
         '<div class="event-body">' +
-          '<div class="event-title">' + esc(ev.title) + '</div>' +
-          descHTML +
-          '<div class="event-time">' + esc(t) + '</div>' +
+          bodyHTML +
         '</div>' +
         '<div class="source-tag">' + esc(ev.source) + '</div>' +
         '<div class="item-tooltip">' + tooltipLines.join('') + '</div>';

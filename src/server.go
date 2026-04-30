@@ -599,12 +599,33 @@ func (m *metaCache) set(key, value string) {
 // ── iCal ──────────────────────────────────────────────────────────────────────
 
 var (
-	prodidRe  = regexp.MustCompile(`(?m)^PRODID:.*$`)
-	veventRe  = regexp.MustCompile(`(?s)BEGIN:VEVENT\r?\n.*?END:VEVENT\r?\n?`)
-	slugRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-	slugifyRe = regexp.MustCompile(`[^a-z0-9]+`)
-	unfoldRe  = regexp.MustCompile(`\r?\n[ \t]`)
+	prodidRe     = regexp.MustCompile(`(?m)^PRODID:.*$`)
+	veventRe     = regexp.MustCompile(`(?s)BEGIN:VEVENT\r?\n.*?END:VEVENT\r?\n?`)
+	slugRe       = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	slugifyRe    = regexp.MustCompile(`[^a-z0-9]+`)
+	unfoldRe     = regexp.MustCompile(`\r?\n[ \t]`)
+	arrSummaryRe = regexp.MustCompile(`^(.+?)\s+-\s+(\d+)x(\d+)\s+-\s+(.+)$`)
 )
+
+type arrParsed struct {
+	SeriesName  string
+	EpisodeName string
+	SE          string
+}
+
+func parseArrSummary(summary string) (arrParsed, bool) {
+	m := arrSummaryRe.FindStringSubmatch(strings.TrimSpace(summary))
+	if m == nil {
+		return arrParsed{}, false
+	}
+	s, _ := strconv.Atoi(m[2])
+	e, _ := strconv.Atoi(m[3])
+	return arrParsed{
+		SeriesName:  strings.TrimSpace(m[1]),
+		EpisodeName: strings.TrimSpace(m[4]),
+		SE:          fmt.Sprintf("S%02d E%02d", s, e),
+	}, true
+}
 
 // reservedSlugs are URL segments already claimed by other routes.
 var reservedSlugs = map[string]bool{
@@ -1667,6 +1688,9 @@ func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 		Title       string `json:"title"`
 		Description string `json:"description,omitempty"`
 		ImageURL    string `json:"imageUrl,omitempty"`
+		Episode     string `json:"episode,omitempty"`
+		SE          string `json:"se,omitempty"`
+		IsArr       bool   `json:"isArr,omitempty"`
 	}
 
 	resolvedTokens := s.resolvePageSources(pg.Sources)
@@ -1728,6 +1752,14 @@ func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 			}
 			if uid != "" && src.Mode != "" {
 				ev.ImageURL = s.resolveImageURL(src, uid)
+			}
+			if src.Mode == "sonarr" || src.Mode == "radarr" {
+				ev.IsArr = true
+				if parsed, ok := parseArrSummary(ev.Title); ok {
+					ev.Title = parsed.SeriesName
+					ev.Episode = parsed.EpisodeName
+					ev.SE = parsed.SE
+				}
 			}
 			events = append(events, ev)
 		}
