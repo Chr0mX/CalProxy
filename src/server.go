@@ -1715,8 +1715,15 @@ func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	events := make([]event, 0, 24)
-	now := time.Now().UTC().Add(-2 * time.Hour)
+	// Parse optional filter query params
+	showPast := r.URL.Query().Get("showPast") == "true"
+	filterMonth := 0
+	if m, merr := strconv.Atoi(r.URL.Query().Get("month")); merr == nil && m >= 1 && m <= 12 {
+		filterMonth = m
+	}
+
+	events := make([]event, 0, 64)
+	cutoff := time.Now().UTC().Add(-2 * time.Hour)
 
 	for _, token := range resolvedTokens {
 		src, ok := s.db.getSource(token)
@@ -1739,7 +1746,13 @@ func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			tm, err := parseICalDate(dt)
-			if err != nil || tm.Before(now) {
+			if err != nil {
+				continue
+			}
+			if !showPast && tm.Before(cutoff) {
+				continue
+			}
+			if filterMonth != 0 && int(tm.Month()) != filterMonth {
 				continue
 			}
 			uid := extractICalField(unfolded, "UID")
@@ -1766,8 +1779,12 @@ func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slices.SortFunc(events, func(a, b event) int { return strings.Compare(a.Date, b.Date) })
-	if len(events) > 30 {
-		events = events[:30]
+	limit := 30
+	if showPast || filterMonth != 0 {
+		limit = 200
+	}
+	if len(events) > limit {
+		events = events[:limit]
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

@@ -37,12 +37,29 @@
 body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;}
 
 /* ── Header ── */
-header{display:flex;justify-content:space-between;align-items:center;padding:14px 22px;border-bottom:1px solid var(--border);gap:10px;}
+header{display:flex;justify-content:space-between;align-items:center;padding:14px 22px;border-bottom:1px solid var(--border);gap:10px;flex-wrap:wrap;}
 .header-left{display:flex;align-items:center;gap:12px;}
-.header-right{display:flex;align-items:center;gap:8px;}
+.header-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 #page-title{font-weight:700;font-size:15px;}
 .login-link{border:1px solid var(--border);padding:6px 12px;border-radius:8px;color:var(--txt);text-decoration:none;font-size:13px;}
 .login-link:hover{border-color:var(--accent);color:var(--accent);}
+
+/* ── Filter controls ── */
+.filter-bar{display:flex;align-items:center;gap:6px;}
+.filter-select{
+  background:var(--card);border:1px solid var(--border);border-radius:8px;
+  color:var(--txt);font-size:12px;padding:5px 22px 5px 8px;cursor:pointer;outline:none;
+  -webkit-appearance:none;appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%239aa8c1'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 8px center;
+}
+.filter-select:focus{border-color:var(--accent);}
+.filter-toggle{
+  background:none;border:1px solid var(--border);border-radius:8px;
+  color:var(--muted);font-size:12px;padding:5px 10px;cursor:pointer;white-space:nowrap;
+}
+.filter-toggle:hover{border-color:var(--accent);color:var(--accent);}
+.filter-toggle.active{border-color:var(--accent);color:var(--accent);background:rgba(106,168,255,.08);}
 
 /* ── Webcal header button ── */
 .webcal-header-btn{position:relative;display:inline-block;}
@@ -141,6 +158,24 @@ footer a:hover{color:var(--accent);}
     <strong id="page-title">CalProxy</strong>
   </div>
   <div class="header-right">
+    <div class="filter-bar">
+      <select class="filter-select" id="monthSelect" onchange="onMonthChange()">
+        <option value="0">All Months</option>
+        <option value="1">Jan</option>
+        <option value="2">Feb</option>
+        <option value="3">Mar</option>
+        <option value="4">Apr</option>
+        <option value="5">May</option>
+        <option value="6">Jun</option>
+        <option value="7">Jul</option>
+        <option value="8">Aug</option>
+        <option value="9">Sep</option>
+        <option value="10">Oct</option>
+        <option value="11">Nov</option>
+        <option value="12">Dec</option>
+      </select>
+      <button class="filter-toggle" id="pastToggle" onclick="togglePast()">Past: OFF</button>
+    </div>
     <div class="webcal-header-btn" id="webcalHeaderBtn" style="display:none">
       <button onclick="toggleWebcalDrop(event)" title="Subscribe in calendar app">&#128197; Subscribe</button>
       <div class="webcal-drop" id="webcalDrop"></div>
@@ -151,7 +186,7 @@ footer a:hover{color:var(--accent);}
 <div class="container">
   <div class="card">
     <div class="card-header-row">
-      <h2>Upcoming Events</h2>
+      <h2 id="cardTitle">Upcoming Events</h2>
       <button class="desc-toggle" id="descToggleBtn" onclick="toggleDescriptions()" title="Show/hide event descriptions">Desc: OFF</button>
     </div>
     <div id="calendar" class="empty">Loading events…</div>
@@ -174,135 +209,162 @@ footer a:hover{color:var(--accent);}
 </div>
 
 <script>
-(async function () {
-  const slug = window.location.pathname.replace(/^\/+/, '') || '';
-  const calRoot = document.getElementById('calendar');
+// ── State ────────────────────────────────────────────────────────────────────
+var _cp = {
+  slug: window.location.pathname.replace(/^\/+/, '') || '',
+  showPast: false,
+  selectedMonth: new Date().getMonth() + 1, // 1-12, default to current month
+  initialized: false,
+  showDescriptions: localStorage.getItem('calproxy-show-desc') === 'true',
+};
 
-  // Description toggle state — persisted in localStorage
-  let showDescriptions = localStorage.getItem('calproxy-show-desc') === 'true';
+// ── Init ──────────────────────────────────────────────────────────────────────
+(function () {
+  document.getElementById('monthSelect').value = _cp.selectedMonth;
   updateDescToggleBtn();
+  loadEvents();
+})();
 
-  let data;
+// ── Data fetching ─────────────────────────────────────────────────────────────
+async function loadEvents() {
+  var calRoot = document.getElementById('calendar');
+  calRoot.innerHTML = '<span class="empty">Loading events…</span>';
+
+  var params = new URLSearchParams();
+  if (_cp.selectedMonth > 0) params.set('month', _cp.selectedMonth);
+  if (_cp.showPast) params.set('showPast', 'true');
+
+  var qs = params.toString() ? '?' + params.toString() : '';
+  var url = '/api/public/page/' + encodeURIComponent(_cp.slug) + qs;
+
+  var data;
   try {
-    const res = await fetch('/api/public/page/' + encodeURIComponent(slug));
-    if (!res.ok) { calRoot.textContent = res.status === 404 ? 'Page not found.' : 'Failed to load page.'; return; }
+    var res = await fetch(url);
+    if (!res.ok) {
+      calRoot.textContent = res.status === 404 ? 'Page not found.' : 'Failed to load page.';
+      return;
+    }
     data = await res.json();
-  } catch { calRoot.textContent = 'Unable to load page data.'; return; }
+  } catch (e) {
+    calRoot.textContent = 'Unable to load page data.';
+    return;
+  }
 
-  // Title
+  if (!_cp.initialized) {
+    _cp.initialized = true;
+    setupPage(data);
+  }
+
+  renderEvents(data.events || []);
+}
+
+function setupPage(data) {
   if (data.title) {
     document.title = data.title + ' — CalProxy';
     document.getElementById('page-title').textContent = data.title;
   }
-
-  // Version footer
   if (data.version) {
     document.getElementById('version-info').textContent = data.version;
   }
 
-  // Theme: localStorage wins; fall back to server-configured theme, then default (blue)
-  const storedTheme = localStorage.getItem('calproxy-theme');
-  const serverTheme = data.theme || '';
-  applyTheme(storedTheme || serverTheme || 'blue');
+  var storedTheme = localStorage.getItem('calproxy-theme');
+  applyTheme(storedTheme || data.theme || 'blue');
   document.getElementById('themeSwitcher').style.display = '';
 
-  // Webcal button in top bar
   if (data.show_webcal && Array.isArray(data.sources) && data.sources.length) {
-    const btn = document.getElementById('webcalHeaderBtn');
-    const drop = document.getElementById('webcalDrop');
-    btn.style.display = '';
+    setupWebcal(data.sources);
+  }
+}
 
-    if (data.sources.length === 1) {
-      const src = data.sources[0];
-      const url = 'webcal://' + window.location.host + '/cal/' + src.token;
-      const b = btn.querySelector('button');
-      b.onclick = null;
-      b.addEventListener('click', function () { window.location.href = url; });
-      drop.parentElement.querySelector('.webcal-drop').remove();
-    } else {
-      drop.innerHTML = data.sources.map(function (src) {
-        const url = 'webcal://' + window.location.host + '/cal/' + src.token;
-        return '<div class="webcal-drop-item">' +
-          '<div><div class="webcal-drop-item-name">' + esc(src.name) + '</div>' +
-          (src.description ? '<div class="webcal-drop-item-desc">' + esc(src.description) + '</div>' : '') +
-          '</div>' +
-          '<a class="webcal-drop-link" href="' + url + '">Subscribe</a>' +
-          '</div>';
-      }).join('');
-    }
+function setupWebcal(sources) {
+  var btn = document.getElementById('webcalHeaderBtn');
+  var drop = document.getElementById('webcalDrop');
+  btn.style.display = '';
+
+  if (sources.length === 1) {
+    var src = sources[0];
+    var wcUrl = 'webcal://' + window.location.host + '/cal/' + src.token;
+    var b = btn.querySelector('button');
+    b.onclick = null;
+    b.addEventListener('click', function () { window.location.href = wcUrl; });
+    var existingDrop = btn.querySelector('.webcal-drop');
+    if (existingDrop) existingDrop.remove();
+  } else {
+    drop.innerHTML = sources.map(function (src) {
+      var wcUrl = 'webcal://' + window.location.host + '/cal/' + src.token;
+      return '<div class="webcal-drop-item">' +
+        '<div><div class="webcal-drop-item-name">' + esc(src.name) + '</div>' +
+        (src.description ? '<div class="webcal-drop-item-desc">' + esc(src.description) + '</div>' : '') +
+        '</div>' +
+        '<a class="webcal-drop-link" href="' + wcUrl + '">Subscribe</a>' +
+        '</div>';
+    }).join('');
+  }
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────────
+function renderEvents(events) {
+  var calRoot = document.getElementById('calendar');
+  updateCardTitle();
+
+  if (!events.length) {
+    var now = new Date();
+    var hint = _cp.selectedMonth > 0 && !_cp.showPast && _cp.selectedMonth < now.getMonth() + 1
+      ? 'No events. Enable “Past: ON” to see past events.'
+      : 'No events found.';
+    calRoot.innerHTML = '<span class="empty">' + hint + '</span>';
+    return;
   }
 
-  // Events
-  const events = data.events || [];
-  if (!events.length) { calRoot.textContent = 'No upcoming events.'; return; }
-
-  const groups = {};
+  var groups = {};
   events.forEach(function (e) {
-    const label = new Date(e.date).toLocaleDateString(undefined, {weekday: 'short', month: 'short', day: 'numeric'});
+    var label = new Date(e.date).toLocaleDateString(undefined, {weekday: 'short', month: 'short', day: 'numeric'});
     (groups[label] = groups[label] || []).push(e);
   });
 
   calRoot.innerHTML = '';
-  Object.entries(groups).forEach(function ([dateLabel, list]) {
-    const g = document.createElement('div');
+  Object.entries(groups).forEach(function (_ref) {
+    var dateLabel = _ref[0], list = _ref[1];
+    var g = document.createElement('div');
     g.className = 'group';
     g.innerHTML = '<div class="date">' + esc(dateLabel) + '</div>';
     list.forEach(function (ev) {
-      const t = new Date(ev.date).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-      const item = document.createElement('div');
+      var t = new Date(ev.date).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+      var item = document.createElement('div');
       item.className = 'item';
 
-      // Thumbnail — left aligned
-      const thumbHTML = ev.imageUrl
+      var thumbHTML = ev.imageUrl
         ? '<img class="event-thumb" src="' + esc(ev.imageUrl) + '" alt="" loading="lazy" />'
         : '<div class="event-thumb-placeholder"></div>';
 
-      // Description — shown/hidden via toggle
-      const descHTML = ev.description
-        ? '<div class="event-desc' + (showDescriptions ? ' visible' : '') + '">' + esc(truncate(ev.description, 120)) + '</div>'
+      var descHTML = ev.description
+        ? '<div class="event-desc' + (_cp.showDescriptions ? ' visible' : '') + '">' + esc(truncate(ev.description, 120)) + '</div>'
         : '';
 
-      // Tooltip content
-      const tooltipLines = [
-        '<div class="tooltip-title">' + esc(ev.title) + '</div>',
-      ];
+      var tooltipLines = ['<div class="tooltip-title">' + esc(ev.title) + '</div>'];
       if (ev.isArr && ev.episode) {
-        tooltipLines.push('<div class="tooltip-meta">' + esc(ev.se || '') + (ev.se ? ' &nbsp;·&nbsp; ' : '') + esc(t) + ' &nbsp;·&nbsp; ' + esc(ev.source) + '</div>');
+        tooltipLines.push('<div class="tooltip-meta">' + esc(ev.se || '') + (ev.se ? ' &nbsp;\xb7&nbsp; ' : '') + esc(t) + ' &nbsp;\xb7&nbsp; ' + esc(ev.source) + '</div>');
         tooltipLines.push('<div class="tooltip-desc" style="color:var(--txt);opacity:0.8;font-size:11px;margin-top:2px;">' + esc(ev.episode) + '</div>');
       } else {
-        tooltipLines.push('<div class="tooltip-meta">' + esc(t) + ' &nbsp;·&nbsp; ' + esc(ev.source) + '</div>');
+        tooltipLines.push('<div class="tooltip-meta">' + esc(t) + ' &nbsp;\xb7&nbsp; ' + esc(ev.source) + '</div>');
       }
       if (ev.description) {
         tooltipLines.push('<div class="tooltip-desc">' + esc(truncate(ev.description, 300)) + '</div>');
       }
 
-      // Body layout differs for ARR sources
-      let bodyHTML;
+      var bodyHTML;
       if (ev.isArr) {
         item.classList.add('arr');
-        const episodeHTML = ev.episode
-          ? '<div class="event-episode">' + esc(ev.episode) + '</div>'
-          : '';
-        const seTimeHTML = '<div class="event-se-time">' +
-          (ev.se ? esc(ev.se) + ' &nbsp;·&nbsp; ' : '') + esc(t) +
-          '</div>';
-        bodyHTML =
-          '<div class="event-title">' + esc(ev.title) + '</div>' +
-          episodeHTML +
-          descHTML +
-          seTimeHTML;
+        var episodeHTML = ev.episode ? '<div class="event-episode">' + esc(ev.episode) + '</div>' : '';
+        var seTimeHTML = '<div class="event-se-time">' + (ev.se ? esc(ev.se) + ' &nbsp;\xb7&nbsp; ' : '') + esc(t) + '</div>';
+        bodyHTML = '<div class="event-title">' + esc(ev.title) + '</div>' + episodeHTML + descHTML + seTimeHTML;
       } else {
-        bodyHTML =
-          '<div class="event-title">' + esc(ev.title) + '</div>' +
-          descHTML +
-          '<div class="event-time">' + esc(t) + '</div>';
+        bodyHTML = '<div class="event-title">' + esc(ev.title) + '</div>' + descHTML + '<div class="event-time">' + esc(t) + '</div>';
       }
 
       item.innerHTML =
         thumbHTML +
-        '<div class="event-body">' +
-          bodyHTML +
-        '</div>' +
+        '<div class="event-body">' + bodyHTML + '</div>' +
         '<div class="source-tag">' + esc(ev.source) + '</div>' +
         '<div class="item-tooltip">' + tooltipLines.join('') + '</div>';
 
@@ -310,44 +372,64 @@ footer a:hover{color:var(--accent);}
     });
     calRoot.appendChild(g);
   });
+}
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
-
-  function applyTheme(t) {
-    const valid = ['blue', 'orange', 'gold', 'mixed'];
-    t = valid.includes(t) ? t : 'blue';
-    document.documentElement.dataset.theme = t === 'blue' ? '' : t;
-    document.querySelectorAll('.theme-opt').forEach(function (el) {
-      el.classList.toggle('active', el.dataset.theme === t);
-    });
+function updateCardTitle() {
+  var h2 = document.getElementById('cardTitle');
+  if (!h2) return;
+  var months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  var m = _cp.selectedMonth;
+  if (m > 0 && _cp.showPast) {
+    h2.textContent = 'Events in ' + months[m - 1];
+  } else if (m > 0) {
+    h2.textContent = 'Events in ' + months[m - 1];
+  } else if (_cp.showPast) {
+    h2.textContent = 'All Events';
+  } else {
+    h2.textContent = 'Upcoming Events';
   }
+}
 
-  function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  }
+// ── Filter handlers ───────────────────────────────────────────────────────────
+function onMonthChange() {
+  _cp.selectedMonth = parseInt(document.getElementById('monthSelect').value, 10);
+  loadEvents();
+}
 
-  // expose to onclick handlers in the static HTML
-  window._applyTheme = applyTheme;
-  window._escFn = esc;
-})();
+function togglePast() {
+  _cp.showPast = !_cp.showPast;
+  updatePastToggleBtn();
+  loadEvents();
+}
 
-function truncate(s, n) {
-  if (!s) return '';
-  // Replace actual newlines with space for inline display
-  s = s.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
-  return s.length > n ? s.slice(0, n) + '…' : s;
+function updatePastToggleBtn() {
+  var btn = document.getElementById('pastToggle');
+  if (!btn) return;
+  btn.textContent = 'Past: ' + (_cp.showPast ? 'ON' : 'OFF');
+  btn.classList.toggle('active', _cp.showPast);
+}
+
+// ── Theme helpers ─────────────────────────────────────────────────────────────
+function applyTheme(t) {
+  var valid = ['blue', 'orange', 'gold', 'mixed'];
+  t = valid.includes(t) ? t : 'blue';
+  document.documentElement.dataset.theme = t === 'blue' ? '' : t;
+  document.querySelectorAll('.theme-opt').forEach(function (el) {
+    el.classList.toggle('active', el.dataset.theme === t);
+  });
 }
 
 function setTheme(t) {
   localStorage.setItem('calproxy-theme', t);
-  if (window._applyTheme) window._applyTheme(t);
+  applyTheme(t);
   document.getElementById('themePanel').classList.remove('open');
 }
 
 function toggleThemePanel(e) {
   e.stopPropagation();
   document.getElementById('themePanel').classList.toggle('open');
-  document.getElementById('webcalDrop') && document.getElementById('webcalDrop').classList.remove('open');
+  var d = document.getElementById('webcalDrop');
+  if (d) d.classList.remove('open');
 }
 
 function toggleWebcalDrop(e) {
@@ -356,19 +438,30 @@ function toggleWebcalDrop(e) {
   document.getElementById('themePanel').classList.remove('open');
 }
 
+// ── Description toggle ────────────────────────────────────────────────────────
 function toggleDescriptions() {
-  const show = localStorage.getItem('calproxy-show-desc') !== 'true';
-  localStorage.setItem('calproxy-show-desc', show ? 'true' : 'false');
+  _cp.showDescriptions = !_cp.showDescriptions;
+  localStorage.setItem('calproxy-show-desc', _cp.showDescriptions ? 'true' : 'false');
   document.querySelectorAll('.event-desc').forEach(function (el) {
-    el.classList.toggle('visible', show);
+    el.classList.toggle('visible', _cp.showDescriptions);
   });
   updateDescToggleBtn();
 }
 
 function updateDescToggleBtn() {
-  const show = localStorage.getItem('calproxy-show-desc') === 'true';
-  const btn = document.getElementById('descToggleBtn');
-  if (btn) btn.textContent = 'Desc: ' + (show ? 'ON' : 'OFF');
+  var btn = document.getElementById('descToggleBtn');
+  if (btn) btn.textContent = 'Desc: ' + (_cp.showDescriptions ? 'ON' : 'OFF');
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function truncate(s, n) {
+  if (!s) return '';
+  s = s.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
 // Close dropdowns on outside click
