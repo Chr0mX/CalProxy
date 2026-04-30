@@ -166,3 +166,7 @@ go build -o calproxy ./src/
 # Build Docker image
 docker build -t calproxy .
 ```
+
+## Enhancement guide
+
+See `IMPLEMENTATION_GUIDE.md` for a complete implementation plan and production-oriented snippets for trusted reverse-proxy IP handling, public homepage flow, and calendar widget UI.
