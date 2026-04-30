@@ -61,11 +61,56 @@ header{display:flex;justify-content:space-between;align-items:center;padding:14p
 .container{max-width:980px;width:100%;margin:auto;padding:20px;flex:1;}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px;}
 
+/* ── Card header with toggle ── */
+.card-header-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+.card-header-row h2{margin:0;font-size:16px;}
+.desc-toggle{background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:11px;padding:3px 9px;cursor:pointer;line-height:1.4;}
+.desc-toggle:hover{border-color:var(--accent);color:var(--accent);}
+
 /* ── Calendar events ── */
 .group{margin-top:18px;}
 .date{font-weight:700;margin:12px 0 8px;color:var(--accent);}
-.item{display:flex;justify-content:space-between;padding:9px 10px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;gap:10px;}
-.source-tag{color:var(--muted);white-space:nowrap;}
+
+/* ── Event item with thumbnail ── */
+.item{
+  display:flex;align-items:flex-start;padding:8px 10px;
+  border:1px solid var(--border);border-radius:10px;margin-bottom:8px;gap:10px;
+  position:relative;cursor:default;
+}
+.item:hover{border-color:var(--accent);background:rgba(106,168,255,.04);}
+
+/* Poster thumbnail — LEFT aligned, fixed size */
+.event-thumb{
+  width:40px;height:58px;object-fit:cover;border-radius:5px;
+  flex-shrink:0;background:var(--border);
+}
+.event-thumb-placeholder{
+  width:40px;height:58px;border-radius:5px;flex-shrink:0;
+  background:var(--border);opacity:0.4;
+}
+
+/* Event body */
+.event-body{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:2px;}
+.event-title{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.event-desc{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:none;}
+.event-desc.visible{display:block;}
+.event-time{font-size:11px;color:var(--muted);}
+.source-tag{color:var(--muted);white-space:nowrap;font-size:12px;align-self:center;flex-shrink:0;}
+
+/* ── Hover tooltip ── */
+.item-tooltip{
+  display:none;position:absolute;z-index:200;
+  background:var(--card);border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;max-width:320px;min-width:180px;
+  box-shadow:0 8px 24px rgba(0,0,0,.35);
+  left:0;top:calc(100% + 6px);font-size:12px;line-height:1.5;
+  pointer-events:none;
+}
+.item:hover .item-tooltip{display:block;}
+.tooltip-title{font-weight:600;margin-bottom:4px;color:var(--txt);}
+.tooltip-desc{color:var(--muted);font-size:11px;margin-top:4px;white-space:pre-wrap;word-break:break-word;}
+.tooltip-meta{color:var(--accent2);font-size:11px;margin-top:4px;}
+
 .empty{color:var(--muted);}
 
 /* ── Footer ── */
@@ -100,7 +145,10 @@ footer a:hover{color:var(--accent);}
 </header>
 <div class="container">
   <div class="card">
-    <h2 style="margin:0 0 8px">Upcoming Events</h2>
+    <div class="card-header-row">
+      <h2>Upcoming Events</h2>
+      <button class="desc-toggle" id="descToggleBtn" onclick="toggleDescriptions()" title="Show/hide event descriptions">Desc: OFF</button>
+    </div>
     <div id="calendar" class="empty">Loading events…</div>
   </div>
 </div>
@@ -124,6 +172,10 @@ footer a:hover{color:var(--accent);}
 (async function () {
   const slug = window.location.pathname.replace(/^\/+/, '') || '';
   const calRoot = document.getElementById('calendar');
+
+  // Description toggle state — persisted in localStorage
+  let showDescriptions = localStorage.getItem('calproxy-show-desc') === 'true';
+  updateDescToggleBtn();
 
   let data;
   try {
@@ -156,7 +208,6 @@ footer a:hover{color:var(--accent);}
     btn.style.display = '';
 
     if (data.sources.length === 1) {
-      // Single source: direct link on the button
       const src = data.sources[0];
       const url = 'webcal://' + window.location.host + '/cal/' + src.token;
       const b = btn.querySelector('button');
@@ -164,7 +215,6 @@ footer a:hover{color:var(--accent);}
       b.addEventListener('click', function () { window.location.href = url; });
       drop.parentElement.querySelector('.webcal-drop').remove();
     } else {
-      // Multiple sources: dropdown
       drop.innerHTML = data.sources.map(function (src) {
         const url = 'webcal://' + window.location.host + '/cal/' + src.token;
         return '<div class="webcal-drop-item">' +
@@ -196,15 +246,42 @@ footer a:hover{color:var(--accent);}
       const t = new Date(ev.date).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
       const item = document.createElement('div');
       item.className = 'item';
+
+      // Thumbnail — left aligned
+      const thumbHTML = ev.imageUrl
+        ? '<img class="event-thumb" src="' + esc(ev.imageUrl) + '" alt="" loading="lazy" />'
+        : '<div class="event-thumb-placeholder"></div>';
+
+      // Description — shown/hidden via toggle
+      const descHTML = ev.description
+        ? '<div class="event-desc' + (showDescriptions ? ' visible' : '') + '">' + esc(truncate(ev.description, 120)) + '</div>'
+        : '';
+
+      // Tooltip content
+      const tooltipLines = [
+        '<div class="tooltip-title">' + esc(ev.title) + '</div>',
+        '<div class="tooltip-meta">' + esc(t) + ' &nbsp;·&nbsp; ' + esc(ev.source) + '</div>',
+      ];
+      if (ev.description) {
+        tooltipLines.push('<div class="tooltip-desc">' + esc(truncate(ev.description, 300)) + '</div>');
+      }
+
       item.innerHTML =
-        '<div><div>' + esc(ev.title) + '</div><small class="source-tag">' + esc(t) + '</small></div>' +
-        '<div class="source-tag">' + esc(ev.source) + '</div>';
+        thumbHTML +
+        '<div class="event-body">' +
+          '<div class="event-title">' + esc(ev.title) + '</div>' +
+          descHTML +
+          '<div class="event-time">' + esc(t) + '</div>' +
+        '</div>' +
+        '<div class="source-tag">' + esc(ev.source) + '</div>' +
+        '<div class="item-tooltip">' + tooltipLines.join('') + '</div>';
+
       g.appendChild(item);
     });
     calRoot.appendChild(g);
   });
 
-  // ── Theme helpers ──────────────────────────────────────────────────────────
+  // ── Helpers ────────────────────────────────────────────────────────────────
 
   function applyTheme(t) {
     const valid = ['blue', 'orange', 'gold', 'mixed'];
@@ -221,7 +298,15 @@ footer a:hover{color:var(--accent);}
 
   // expose to onclick handlers in the static HTML
   window._applyTheme = applyTheme;
+  window._escFn = esc;
 })();
+
+function truncate(s, n) {
+  if (!s) return '';
+  // Replace actual newlines with space for inline display
+  s = s.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
 
 function setTheme(t) {
   localStorage.setItem('calproxy-theme', t);
@@ -239,6 +324,21 @@ function toggleWebcalDrop(e) {
   e.stopPropagation();
   document.getElementById('webcalDrop').classList.toggle('open');
   document.getElementById('themePanel').classList.remove('open');
+}
+
+function toggleDescriptions() {
+  const show = localStorage.getItem('calproxy-show-desc') !== 'true';
+  localStorage.setItem('calproxy-show-desc', show ? 'true' : 'false');
+  document.querySelectorAll('.event-desc').forEach(function (el) {
+    el.classList.toggle('visible', show);
+  });
+  updateDescToggleBtn();
+}
+
+function updateDescToggleBtn() {
+  const show = localStorage.getItem('calproxy-show-desc') === 'true';
+  const btn = document.getElementById('descToggleBtn');
+  if (btn) btn.textContent = 'Desc: ' + (show ? 'ON' : 'OFF');
 }
 
 // Close dropdowns on outside click

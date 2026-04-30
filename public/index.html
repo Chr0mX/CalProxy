@@ -133,6 +133,8 @@
   .badge.enabled  { color: var(--ok);   border-color: var(--ok);   }
   .badge.disabled { color: var(--muted); border-color: var(--muted); }
   .badge.merge    { color: var(--warn);  border-color: var(--warn);  }
+  .badge.sonarr   { color: #6aa8ff;     border-color: #6aa8ff;     }
+  .badge.radarr   { color: #f5a623;     border-color: #f5a623;     }
 
   .card-actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 
@@ -320,6 +322,13 @@
     <label for="fDesc">Description</label>
     <textarea id="fDesc" rows="2" placeholder="TV show air dates"></textarea>
 
+    <label for="fMode">Mode (for image proxy)</label>
+    <select id="fMode" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:var(--mono);font-size:12px;padding:7px 10px;outline:none;">
+      <option value="">None</option>
+      <option value="sonarr">Sonarr</option>
+      <option value="radarr">Radarr</option>
+    </select>
+
     <div class="checkbox-row">
       <input type="checkbox" id="fEnabled" checked>
       <label for="fEnabled" style="margin:0">Enabled</label>
@@ -489,12 +498,15 @@ function sourceCardHTML(s) {
   const badge = s.enabled
     ? `<span class="badge enabled">enabled</span>`
     : `<span class="badge disabled">disabled</span>`;
+  const modeBadge = s.mode
+    ? `<span class="badge ${esc(s.mode)}">${esc(s.mode)}</span>`
+    : '';
 
   return `
   <div class="card${s.enabled ? '' : ' disabled'}" data-token="${s.token}">
     <div class="card-header">
       <div style="flex:1">
-        <div class="card-title">${esc(s.name)} ${badge}</div>
+        <div class="card-title">${esc(s.name)} ${badge} ${modeBadge}</div>
         ${s.description ? `<div class="card-desc">${esc(s.description)}</div>` : ''}
       </div>
       <div class="card-actions">
@@ -641,6 +653,7 @@ function openAdd() {
   document.getElementById('fName').value = '';
   document.getElementById('fUrl').value = '';
   document.getElementById('fDesc').value = '';
+  document.getElementById('fMode').value = '';
   document.getElementById('fEnabled').checked = true;
   clearModalErr();
   document.getElementById('modal').classList.add('open');
@@ -655,6 +668,7 @@ async function openEdit(token) {
     document.getElementById('fName').value = src.name;
     document.getElementById('fUrl').value = src.upstreamUrl;
     document.getElementById('fDesc').value = src.description || '';
+    document.getElementById('fMode').value = src.mode || '';
     document.getElementById('fEnabled').checked = src.enabled;
     clearModalErr();
     document.getElementById('modal').classList.add('open');
@@ -673,6 +687,7 @@ async function saveSource() {
   const name = document.getElementById('fName').value.trim();
   const upstreamUrl = document.getElementById('fUrl').value.trim();
   const description = document.getElementById('fDesc').value.trim();
+  const mode = document.getElementById('fMode').value || undefined;
   const enabled = document.getElementById('fEnabled').checked;
 
   if (!name || !upstreamUrl) {
@@ -684,10 +699,10 @@ async function saveSource() {
   btn.disabled = true;
   try {
     if (editToken) {
-      await api('PUT', `/api/sources/${editToken}`, { name, upstreamUrl, description, enabled });
+      await api('PUT', `/api/sources/${editToken}`, { name, upstreamUrl, description, mode, enabled });
       toast('Source updated');
     } else {
-      await api('POST', '/api/sources', { name, upstreamUrl, description, enabled });
+      await api('POST', '/api/sources', { name, upstreamUrl, description, mode, enabled });
       toast('Source created');
     }
     closeModal();
