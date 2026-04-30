@@ -48,9 +48,9 @@ jobs:
 
           TAGS="${IMAGE}:sha-${SHORT_SHA}"
 
-          # :latest on default branch
+          # :latest and :dev on default branch
           if [[ "$REF" == "refs/heads/main" ]]; then
-            TAGS="${TAGS},${IMAGE}:latest"
+            TAGS="${TAGS},${IMAGE}:latest,${IMAGE}:dev"
           fi
 
           # semver tags from git tag (v1.2.3 → 1, 1.2, 1.2.3)
