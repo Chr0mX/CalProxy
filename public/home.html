@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CalProxy Homepage</title>
+<style>
+:root { --bg:#0b1020; --card:#131a2b; --txt:#e6edf7; --muted:#9aa8c1; --border:#263149; --accent:#6aa8ff; }
+@media (prefers-color-scheme: light){ :root{--bg:#f4f7fb;--card:#fff;--txt:#0f172a;--muted:#52607a;--border:#d8e0ef;--accent:#2563eb;} }
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,sans-serif}
+header{display:flex;justify-content:space-between;align-items:center;padding:18px 22px;border-bottom:1px solid var(--border)}
+.container{max-width:980px;margin:auto;padding:20px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+.login{border:1px solid var(--border);padding:8px 12px;border-radius:10px;color:var(--txt);text-decoration:none}
+.login:hover{border-color:var(--accent);color:var(--accent)}
+.group{margin-top:18px}.date{font-weight:700;margin:12px 0 8px;color:var(--accent)}
+.item{display:flex;justify-content:space-between;padding:9px 10px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;gap:10px}
+.source{color:var(--muted);white-space:nowrap}.empty{color:var(--muted)}
+</style>
+</head>
+<body>
+<header><strong>CalProxy</strong><a class="login" href="/login">Login</a></header>
+<div class="container">
+  <div class="card">
+    <h2 style="margin:0 0 8px 0">Upcoming Calendar</h2>
+    <div id="calendar" class="empty">Loading events…</div>
+  </div>
+</div>
+<script>
+(async function(){
+  const root=document.getElementById('calendar');
+  try {
+    const res=await fetch('/api/public/homepage');
+    if(!res.ok) throw new Error('failed');
+    const data=await res.json();
+    const events=data.events||[];
+    if(!events.length){ root.textContent='No upcoming events.'; return; }
+    const groups={};
+    events.forEach(e=>{const d=new Date(e.date).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});(groups[d]=groups[d]||[]).push(e);});
+    root.innerHTML='';
+    Object.entries(groups).forEach(([date,list])=>{
+      const g=document.createElement('div'); g.className='group';
+      g.innerHTML=`<div class="date">${date}</div>`;
+      list.forEach(ev=>{const t=new Date(ev.date).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); const i=document.createElement('div'); i.className='item'; i.innerHTML=`<div><div>${ev.title}</div><small class="source">${t}</small></div><div class="source">${ev.source}</div>`; g.appendChild(i);});
+      root.appendChild(g);
+    });
+  } catch { root.textContent='Unable to load homepage data.'; }
+})();
+</script>
+</body>
+</html>
