@@ -875,6 +875,36 @@ function pageCardHTML(p) {
   const webcalBadge  = p.show_webcal_button ? `<span class="badge enabled">webcal</span> ` : '';
   const themeBadge   = p.theme ? `<span class="badge" style="background:var(--muted);color:#fff">${esc(p.theme)}</span> ` : '';
 
+  // Build cal URL rows for each source: merge group entries use the merge group URL,
+  // plain sources use their own source URL.
+  const calRows = (p.sources || []).map(tok => {
+    let token, label;
+    if (tok.startsWith('merge:')) {
+      const mgToken = tok.slice(6);
+      const mg = merges.find(m => m.token === mgToken);
+      if (!mg) return '';
+      token = mg.token;
+      label = mg.name + ' (merge)';
+    } else {
+      const src = sources.find(s => s.token === tok);
+      if (!src) return '';
+      token = src.token;
+      label = src.name;
+    }
+    const calUrl    = `${origin}/cal/${token}`;
+    const webcalUrl = calUrl.replace(/^https?/, 'webcal');
+    return `
+    <div class="token-row">
+      <span class="token-label" title="${esc(label)}" style="max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</span>
+      <span class="token-value">${esc(calUrl)}</span>
+      <div class="copy-group">
+        <button class="small" onclick="copy('${calUrl}', this)">Copy HTTPS</button>
+        <button class="small" onclick="copy('${webcalUrl}', this)">Copy webcal://</button>
+        <a class="btn" href="${webcalUrl}" title="Open in system calendar app">Open in Webcal</a>
+      </div>
+    </div>`;
+  }).join('');
+
   return `
   <div class="card" data-slug="${esc(p.slug)}">
     <div class="card-header">
@@ -899,6 +929,7 @@ function pageCardHTML(p) {
         <a class="btn" href="${pageUrl}" target="_blank">Open</a>
       </div>
     </div>
+    ${calRows}
   </div>`;
 }
 
