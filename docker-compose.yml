@@ -1,6 +1,6 @@
 services:
   calproxy:
-    image: ghcr.io/chr0mx/calproxy:latest
+    image: ghcr.io/chr0mx/calproxy:dev
     container_name: calproxy
     restart: unless-stopped
 

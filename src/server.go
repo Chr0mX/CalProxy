@@ -11,11 +11,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,11 +28,20 @@ import (
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
+type publicHomepageConfig struct {
+	Enabled     bool     `json:"enabled"`
+	RequireAuth bool     `json:"require_auth"`
+	Title       string   `json:"title"`
+	Sources     []string `json:"sources"`
+}
+
 type config struct {
-	Port          string
-	AdminPassword string
-	DataFile      string
-	CacheTTL      int // seconds
+	Port           string
+	AdminPassword  string
+	DataFile       string
+	CacheTTL       int // seconds
+	TrustedProxies []string
+	PublicHomepage publicHomepageConfig
 }
 
 func loadConfig() config {
@@ -51,7 +63,25 @@ func loadConfig() config {
 	if dataFile == "" {
 		dataFile = "./data/sources.json"
 	}
-	return config{Port: port, AdminPassword: pass, DataFile: dataFile, CacheTTL: ttl}
+	trusted := []string{"127.0.0.1/32"}
+	if v := os.Getenv("TRUSTED_PROXIES"); v != "" {
+		trusted = strings.Split(v, ",")
+	}
+	ph := publicHomepageConfig{
+		Enabled: os.Getenv("PUBLIC_HOMEPAGE_ENABLED") != "false",
+		Title:   "My Media Dashboard",
+		Sources: []string{"all"},
+	}
+	if v := os.Getenv("PUBLIC_HOMEPAGE_TITLE"); v != "" {
+		ph.Title = v
+	}
+	if v := os.Getenv("PUBLIC_HOMEPAGE_SOURCES"); v != "" {
+		ph.Sources = strings.Split(v, ",")
+	}
+	if os.Getenv("PUBLIC_HOMEPAGE_REQUIRE_AUTH") == "true" {
+		ph.RequireAuth = true
+	}
+	return config{Port: port, AdminPassword: pass, DataFile: dataFile, CacheTTL: ttl, TrustedProxies: trusted, PublicHomepage: ph}
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -299,27 +329,42 @@ func tokenFromPath(r *http.Request, prefix string) string {
 // ── Server ────────────────────────────────────────────────────────────────────
 
 type server struct {
-	cfg   config
-	db    *store
-	cache *cache
+	cfg         config
+	db          *store
+	cache       *cache
+	trustedNets []netip.Prefix
 }
 
 func newServer(cfg config) *server {
+	nets := make([]netip.Prefix, 0, len(cfg.TrustedProxies))
+	for _, raw := range cfg.TrustedProxies {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if !strings.Contains(raw, "/") {
+			raw += "/32"
+		}
+		p, err := netip.ParsePrefix(raw)
+		if err == nil {
+			nets = append(nets, p.Masked())
+		}
+	}
 	return &server{
-		cfg:   cfg,
-		db:    newStore(cfg.DataFile),
-		cache: newCache(cfg.CacheTTL),
+		cfg:         cfg,
+		db:          newStore(cfg.DataFile),
+		cache:       newCache(cfg.CacheTTL),
+		trustedNets: nets,
 	}
 }
 
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	// Public calendar endpoint.
 	mux.HandleFunc("/cal/", s.handleCal)
-
-	// Admin UI — basic auth protected.
-	mux.HandleFunc("/", basicAuth(s.cfg.AdminPassword, s.handleUI))
+	mux.HandleFunc("/api/public/homepage", s.handlePublicHomepageData)
+	mux.HandleFunc("/", s.handleHomepage)
+	mux.HandleFunc("/admin", basicAuth(s.cfg.AdminPassword, s.handleUI))
 
 	// Admin API — basic auth protected.
 	mux.HandleFunc("/api/sources", basicAuth(s.cfg.AdminPassword, s.handleSources))
@@ -337,6 +382,7 @@ func (s *server) handleCal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := strings.TrimPrefix(r.URL.Path, "/cal/")
+	_ = s.clientIP(r)
 	if token == "" {
 		http.NotFound(w, r)
 		return
@@ -538,11 +584,100 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 // handleUI serves the admin SPA from the embedded public/index.html.
 func (s *server) handleUI(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/admin" {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, "public/admin.html")
+}
+
+func (s *server) handleHomepage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
+	if !s.cfg.PublicHomepage.Enabled {
+		http.Redirect(w, r, "/admin", http.StatusFound)
+		return
+	}
 	http.ServeFile(w, r, "public/index.html")
+}
+
+func (s *server) handlePublicHomepageData(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cfg.PublicHomepage.RequireAuth {
+		_, pass, ok := r.BasicAuth()
+		if !ok || pass != s.cfg.AdminPassword {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+	type item struct {
+		Title  string `json:"title"`
+		Source string `json:"source"`
+		Date   string `json:"date"`
+		Time   string `json:"time"`
+	}
+	items := []item{}
+	for _, src := range s.db.list() {
+		if !src.Enabled {
+			continue
+		}
+		items = append(items, item{Title: src.Name, Source: src.Description, Date: time.Now().Format("2006-01-02"), Time: "feed"})
+	}
+	by := map[string][]item{}
+	for _, it := range items {
+		by[it.Date] = append(by[it.Date], it)
+	}
+	dates := make([]string, 0, len(by))
+	for d := range by {
+		dates = append(dates, d)
+	}
+	sort.Strings(dates)
+	days := make([]map[string]any, 0, len(dates))
+	for _, d := range dates {
+		days = append(days, map[string]any{"date": d, "items": by[d]})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"title": s.cfg.PublicHomepage.Title, "days": days})
+}
+
+func (s *server) clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	rip, err := netip.ParseAddr(strings.TrimSpace(host))
+	if err != nil {
+		return host
+	}
+	trusted := false
+	for _, p := range s.trustedNets {
+		if p.Contains(rip) {
+			trusted = true
+			break
+		}
+	}
+	if !trusted {
+		return rip.String()
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			a, err := netip.ParseAddr(strings.TrimSpace(parts[i]))
+			if err == nil {
+				return a.String()
+			}
+		}
+	}
+	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
+		if a, err := netip.ParseAddr(xr); err == nil {
+			return a.String()
+		}
+	}
+	return rip.String()
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
