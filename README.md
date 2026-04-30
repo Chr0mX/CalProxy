@@ -41,7 +41,7 @@ cd calproxy
 docker compose up -d --build
 ```
 
-Open `http://your-host:3456` and log in with any username and the password you set.
+Open `http://your-host:3456` to view the public homepage. Click **Login** to access admin.
 
 ---
 
@@ -70,6 +70,8 @@ CalProxy will proxy it via a token URL that is safe to share.
 | `ADMIN_PASSWORD` | `changeme` | Password for HTTP Basic Auth (any username accepted) |
 | `DATA_FILE` | `./data/sources.json` | Path to the JSON persistence file |
 | `CACHE_TTL` | `300` | How long to cache upstream feeds, in seconds |
+| `PUBLIC_HOMEPAGE_ENABLED` | `true` | If `true`, `/` serves public homepage without auth |
+| `TRUSTED_PROXIES` | _(empty)_ | Comma-separated IP/CIDR list that may supply `X-Real-IP` / `X-Forwarded-For` |
 
 ---
 
@@ -89,7 +91,7 @@ Calendar clients should use `webcal://calproxy.example.com/cal/<token>`.
 
 ## Admin API reference
 
-All admin endpoints require HTTP Basic Auth (any username, `ADMIN_PASSWORD`).
+All admin endpoints require a logged-in session cookie.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -100,6 +102,7 @@ All admin endpoints require HTTP Basic Auth (any username, `ADMIN_PASSWORD`).
 | `DELETE` | `/api/sources/:token` | Delete source and evict its cache entry |
 | `POST` | `/api/sources/:token/refresh` | Purge cached feed for one source |
 | `GET` | `/api/stats` | Returns `{ sources, cached, cacheTtl }` |
+| `GET` | `/api/public/homepage` | Public homepage data with aggregated upcoming events |
 
 ### Source schema
 
@@ -166,3 +169,21 @@ go build -o calproxy ./src/
 # Build Docker image
 docker build -t calproxy .
 ```
+
+
+## Reverse proxy real client IP
+
+Set `TRUSTED_PROXIES` to the IPs/CIDRs of your proxy hops (for example `127.0.0.1,172.16.0.0/12`). CalProxy only reads `X-Real-IP` and `X-Forwarded-For` when the direct peer (`RemoteAddr`) is in that trusted list; otherwise it falls back to socket `RemoteAddr`.
+
+Example:
+
+```yaml
+environment:
+  TRUSTED_PROXIES: "127.0.0.1,172.16.0.0/12"
+```
+
+## UI flow
+
+- `/` → public homepage with calendar widget and Login button.
+- `/login` → authenticate admin user.
+- `/admin` → full admin dashboard (requires auth).

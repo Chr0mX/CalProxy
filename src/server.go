@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,10 +29,12 @@ import (
 // ── Config ────────────────────────────────────────────────────────────────────
 
 type config struct {
-	Port         string
-	PasswordHash []byte
-	DataFile     string
-	CacheTTL     int
+	Port           string
+	PasswordHash   []byte
+	DataFile       string
+	CacheTTL       int
+	TrustedProxies []netip.Prefix
+	PublicHomepage bool
 }
 
 func loadConfig() config {
@@ -52,12 +57,53 @@ func loadConfig() config {
 		dataFile = "./data/sources.json"
 	}
 
+	publicHomepage := true
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("PUBLIC_HOMEPAGE_ENABLED"))); v == "false" || v == "0" || v == "no" {
+		publicHomepage = false
+	}
+
+	trusted := parseTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
 	if err != nil {
 		log.Fatalf("[CalProxy] FATAL: cannot hash admin password: %v", err)
 	}
 
-	return config{Port: port, PasswordHash: hash, DataFile: dataFile, CacheTTL: ttl}
+	return config{Port: port, PasswordHash: hash, DataFile: dataFile, CacheTTL: ttl, TrustedProxies: trusted, PublicHomepage: publicHomepage}
+}
+
+func parseTrustedProxies(raw string) []netip.Prefix {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]netip.Prefix, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !strings.Contains(p, "/") {
+			addr, err := netip.ParseAddr(p)
+			if err != nil {
+				log.Printf("[CalProxy] WARN: invalid TRUSTED_PROXIES entry %q", p)
+				continue
+			}
+			bits := 32
+			if addr.Is6() {
+				bits = 128
+			}
+			out = append(out, netip.PrefixFrom(addr, bits))
+			continue
+		}
+		prefix, err := netip.ParsePrefix(p)
+		if err != nil {
+			log.Printf("[CalProxy] WARN: invalid TRUSTED_PROXIES CIDR entry %q", p)
+			continue
+		}
+		out = append(out, prefix)
+	}
+	return out
 }
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
@@ -401,8 +447,8 @@ func (c *cache) count() int {
 // ── iCal ──────────────────────────────────────────────────────────────────────
 
 var (
-	prodidRe  = regexp.MustCompile(`(?m)^PRODID:.*$`)
-	veventRe  = regexp.MustCompile(`(?s)BEGIN:VEVENT\r?\n.*?END:VEVENT\r?\n?`)
+	prodidRe = regexp.MustCompile(`(?m)^PRODID:.*$`)
+	veventRe = regexp.MustCompile(`(?s)BEGIN:VEVENT\r?\n.*?END:VEVENT\r?\n?`)
 )
 
 func sanitizeICal(body string) string {
@@ -521,8 +567,11 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/logout", s.handleLogout)
 
+	mux.HandleFunc("/api/public/homepage", s.handlePublicHomepageData)
+
 	// Admin UI — session auth required.
-	mux.HandleFunc("/", s.requireAuth(s.handleUI))
+	mux.HandleFunc("/admin", s.requireAuth(s.handleUI))
+	mux.HandleFunc("/", s.handleRoot)
 
 	// Admin API — session auth required.
 	mux.HandleFunc("/api/sources", s.requireAuth(s.handleSources))
@@ -531,14 +580,86 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/api/merges/", s.requireAuth(s.handleMergesToken))
 	mux.HandleFunc("/api/stats", s.requireAuth(s.handleStats))
 
-	return mux
+	return s.withRealIP(mux)
+}
+
+func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if s.cfg.PublicHomepage {
+		http.ServeFile(w, r, "public/home.html")
+		return
+	}
+	if s.isAuthenticated(r) {
+		http.Redirect(w, r, "/admin", http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+func (s *server) withRealIP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr = s.realClientAddr(r)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *server) realClientAddr(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	remoteAddr, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	if err != nil {
+		return r.RemoteAddr
+	}
+	trusted := false
+	for _, p := range s.cfg.TrustedProxies {
+		if p.Contains(remoteAddr) {
+			trusted = true
+			break
+		}
+	}
+	if !trusted {
+		return r.RemoteAddr
+	}
+	if ip := parseSingleIP(r.Header.Get("X-Real-IP")); ip != "" {
+		return net.JoinHostPort(ip, "0")
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		for _, raw := range parts {
+			if ip := parseSingleIP(strings.TrimSpace(raw)); ip != "" {
+				return net.JoinHostPort(ip, "0")
+			}
+		}
+	}
+	return r.RemoteAddr
+}
+
+func parseSingleIP(v string) string {
+	if v == "" {
+		return ""
+	}
+	if strings.Contains(v, ":") && strings.Count(v, ":") == 1 {
+		if h, _, err := net.SplitHostPort(v); err == nil {
+			v = h
+		}
+	}
+	addr, err := netip.ParseAddr(strings.Trim(v, "[]"))
+	if err != nil {
+		return ""
+	}
+	return addr.String()
 }
 
 // ── Auth routes ───────────────────────────────────────────────────────────────
 
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if s.isAuthenticated(r) {
-		http.Redirect(w, r, "/", http.StatusFound)
+		http.Redirect(w, r, "/admin", http.StatusFound)
 		return
 	}
 	switch r.Method {
@@ -569,7 +690,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			MaxAge:   int(sessionTTL.Seconds()),
 		})
 		log.Printf("[CalProxy] INFO: admin logged in from %s", r.RemoteAddr)
-		http.Redirect(w, r, "/", http.StatusFound)
+		http.Redirect(w, r, "/admin", http.StatusFound)
 	default:
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
@@ -585,7 +706,7 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Path:   "/",
 		MaxAge: -1,
 	})
-	http.Redirect(w, r, "/login", http.StatusFound)
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 // ── Public routes ─────────────────────────────────────────────────────────────
@@ -949,11 +1070,80 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleUI(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	if r.URL.Path != "/admin" {
 		http.NotFound(w, r)
 		return
 	}
 	http.ServeFile(w, r, "public/index.html")
+}
+
+func (s *server) handlePublicHomepageData(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	type event struct {
+		Date   string `json:"date"`
+		Source string `json:"source"`
+		Title  string `json:"title"`
+	}
+	events := make([]event, 0, 24)
+	now := time.Now().UTC().Add(-2 * time.Hour)
+	for _, src := range s.db.listSources() {
+		if !src.Enabled {
+			continue
+		}
+		entry, fresh := s.cache.fresh(src.Token)
+		if !fresh {
+			body, etag, _, err := fetchUpstream(src, "")
+			if err == nil {
+				entry = cacheEntry{data: sanitizeICal(body), etag: etag, fetchedAt: time.Now()}
+				s.cache.set(src.Token, entry)
+			}
+		}
+		for _, block := range veventRe.FindAllString(entry.data, -1) {
+			dt := extractICalField(block, "DTSTART")
+			title := extractICalField(block, "SUMMARY")
+			if dt == "" || title == "" {
+				continue
+			}
+			tm, err := parseICalDate(dt)
+			if err != nil || tm.Before(now) {
+				continue
+			}
+			events = append(events, event{Date: tm.Format(time.RFC3339), Source: src.Name, Title: title})
+		}
+	}
+	slices.SortFunc(events, func(a, b event) int { return strings.Compare(a.Date, b.Date) })
+	if len(events) > 30 {
+		events = events[:30]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events, "generatedAt": time.Now().UTC()})
+}
+
+func extractICalField(block, field string) string {
+	for _, line := range strings.Split(block, "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if strings.HasPrefix(line, field+":") {
+			return strings.TrimPrefix(line, field+":")
+		}
+		if strings.HasPrefix(line, field+";") {
+			if idx := strings.Index(line, ":"); idx > -1 {
+				return line[idx+1:]
+			}
+		}
+	}
+	return ""
+}
+
+func parseICalDate(v string) (time.Time, error) {
+	formats := []string{"20060102T150405Z", "20060102T150405", "20060102"}
+	for _, f := range formats {
+		if tm, err := time.Parse(f, v); err == nil {
+			return tm.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid iCal date")
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
