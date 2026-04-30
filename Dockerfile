@@ -7,7 +7,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY src/ ./src/
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o calproxy ./src/
+
+# Build-time version injection (set with --build-arg VERSION=v1.x.y BRANCH=latest).
+ARG VERSION=dev
+ARG BRANCH=dev
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -ldflags="-s -w -X main.appVersion=${VERSION} -X main.appBranch=${BRANCH}" \
+      -o calproxy ./src/
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM alpine:3.19

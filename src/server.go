@@ -69,6 +69,14 @@ func loadConfig() config {
 		log.Fatalf("[CalProxy] FATAL: cannot hash admin password: %v", err)
 	}
 
+	// Allow runtime override of build-time version vars via env vars.
+	if v := os.Getenv("APP_VERSION"); v != "" {
+		appVersion = v
+	}
+	if v := os.Getenv("APP_BRANCH"); v != "" {
+		appBranch = v
+	}
+
 	return config{Port: port, PasswordHash: hash, DataFile: dataFile, CacheTTL: ttl, TrustedProxies: trusted, PublicHomepage: publicHomepage}
 }
 
@@ -205,17 +213,28 @@ type MergeGroup struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// PublicPage defines a public-facing calendar dashboard accessible via a URL slug.
+type PublicPage struct {
+	Slug        string   `json:"slug"`
+	Title       string   `json:"title"`
+	Sources     []string `json:"sources"` // source tokens to expose
+	IsDefault   bool     `json:"is_default"`
+	ShowWebcal  bool     `json:"show_webcal_button"`
+}
+
 // persistedData is the on-disk JSON format (v2).
 // Legacy format was a plain []Source array and is still read on load.
 type persistedData struct {
 	Sources     []Source     `json:"sources"`
 	MergeGroups []MergeGroup `json:"mergeGroups"`
+	PublicPages []PublicPage `json:"publicPages,omitempty"`
 }
 
 type store struct {
 	mu          sync.RWMutex
 	sources     map[string]Source
 	mergeGroups map[string]MergeGroup
+	publicPages map[string]PublicPage // keyed by slug
 	dataFile    string
 }
 
@@ -223,6 +242,7 @@ func newStore(dataFile string) *store {
 	s := &store{
 		sources:     make(map[string]Source),
 		mergeGroups: make(map[string]MergeGroup),
+		publicPages: make(map[string]PublicPage),
 		dataFile:    dataFile,
 	}
 	s.load()
@@ -244,7 +264,18 @@ func (s *store) load() {
 		for _, mg := range pd.MergeGroups {
 			s.mergeGroups[mg.Token] = mg
 		}
-		log.Printf("[CalProxy] INFO: loaded %d source(s), %d merge group(s)", len(s.sources), len(s.mergeGroups))
+		// Load public pages, auto-fixing missing slugs from titles.
+		for i := range pd.PublicPages {
+			if pd.PublicPages[i].Slug == "" {
+				pd.PublicPages[i].Slug = slugify(pd.PublicPages[i].Title)
+			}
+			s.publicPages[pd.PublicPages[i].Slug] = pd.PublicPages[i]
+		}
+		if err := validatePublicPages(s.listPublicPages()); err != nil {
+			log.Printf("[CalProxy] WARN: public_pages config issue: %v", err)
+		}
+		log.Printf("[CalProxy] INFO: loaded %d source(s), %d merge group(s), %d public page(s)",
+			len(s.sources), len(s.mergeGroups), len(s.publicPages))
 		return
 	}
 
@@ -265,12 +296,16 @@ func (s *store) save() {
 	pd := persistedData{
 		Sources:     make([]Source, 0, len(s.sources)),
 		MergeGroups: make([]MergeGroup, 0, len(s.mergeGroups)),
+		PublicPages: make([]PublicPage, 0, len(s.publicPages)),
 	}
 	for _, src := range s.sources {
 		pd.Sources = append(pd.Sources, src)
 	}
 	for _, mg := range s.mergeGroups {
 		pd.MergeGroups = append(pd.MergeGroups, mg)
+	}
+	for _, pg := range s.publicPages {
+		pd.PublicPages = append(pd.PublicPages, pg)
 	}
 
 	data, err := json.MarshalIndent(pd, "", "  ")
@@ -366,6 +401,88 @@ func (s *store) deleteMergeGroup(token string) bool {
 	return true
 }
 
+func (s *store) listPublicPages() []PublicPage {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]PublicPage, 0, len(s.publicPages))
+	for _, pg := range s.publicPages {
+		out = append(out, pg)
+	}
+	return out
+}
+
+func (s *store) getPublicPageBySlug(slug string) (PublicPage, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	pg, ok := s.publicPages[slug]
+	return pg, ok
+}
+
+func (s *store) getDefaultPublicPage() (PublicPage, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, pg := range s.publicPages {
+		if pg.IsDefault {
+			return pg, true
+		}
+	}
+	return PublicPage{}, false
+}
+
+func (s *store) setPublicPage(pg PublicPage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publicPages[pg.Slug] = pg
+	s.save()
+}
+
+func (s *store) deletePublicPage(slug string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.publicPages[slug]; !ok {
+		return false
+	}
+	delete(s.publicPages, slug)
+	s.save()
+	return true
+}
+
+// slugify converts an arbitrary string into a URL-safe slug.
+func slugify(s string) string {
+	s = strings.ToLower(s)
+	s = slugifyRe.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		s = "page"
+	}
+	return s
+}
+
+// validatePublicPages checks for duplicate slugs and multiple defaults.
+func validatePublicPages(pages []PublicPage) error {
+	seen := make(map[string]bool, len(pages))
+	defaults := 0
+	for _, pg := range pages {
+		if !slugRe.MatchString(pg.Slug) {
+			return fmt.Errorf("slug %q is not URL-safe (use lowercase letters, digits, hyphens)", pg.Slug)
+		}
+		if reservedSlugs[pg.Slug] {
+			return fmt.Errorf("slug %q conflicts with a built-in route", pg.Slug)
+		}
+		if seen[pg.Slug] {
+			return fmt.Errorf("duplicate slug %q", pg.Slug)
+		}
+		seen[pg.Slug] = true
+		if pg.IsDefault {
+			defaults++
+		}
+	}
+	if defaults > 1 {
+		return fmt.Errorf("only one public page may be marked is_default, found %d", defaults)
+	}
+	return nil
+}
+
 // ── Startup writability check ─────────────────────────────────────────────────
 
 func checkWritable(dataFile string) {
@@ -447,8 +564,23 @@ func (c *cache) count() int {
 // ── iCal ──────────────────────────────────────────────────────────────────────
 
 var (
-	prodidRe = regexp.MustCompile(`(?m)^PRODID:.*$`)
-	veventRe = regexp.MustCompile(`(?s)BEGIN:VEVENT\r?\n.*?END:VEVENT\r?\n?`)
+	prodidRe   = regexp.MustCompile(`(?m)^PRODID:.*$`)
+	veventRe   = regexp.MustCompile(`(?s)BEGIN:VEVENT\r?\n.*?END:VEVENT\r?\n?`)
+	slugRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	slugifyRe  = regexp.MustCompile(`[^a-z0-9]+`)
+)
+
+// reservedSlugs are URL segments already claimed by other routes.
+var reservedSlugs = map[string]bool{
+	"admin": true, "login": true, "logout": true,
+	"cal": true, "health": true, "api": true,
+}
+
+// appVersion and appBranch are injected at build time via -ldflags.
+// They fall back to env vars APP_VERSION / APP_BRANCH at runtime.
+var (
+	appVersion = "dev"
+	appBranch  = "dev"
 )
 
 func sanitizeICal(body string) string {
@@ -568,6 +700,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/logout", s.handleLogout)
 
 	mux.HandleFunc("/api/public/homepage", s.handlePublicHomepageData)
+	mux.HandleFunc("/api/public/page/", s.handlePublicPageData)
 
 	// Admin UI — session auth required.
 	mux.HandleFunc("/admin", s.requireAuth(s.handleUI))
@@ -579,24 +712,43 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/api/merges", s.requireAuth(s.handleMerges))
 	mux.HandleFunc("/api/merges/", s.requireAuth(s.handleMergesToken))
 	mux.HandleFunc("/api/stats", s.requireAuth(s.handleStats))
+	mux.HandleFunc("/api/pages", s.requireAuth(s.handleAdminPublicPages))
+	mux.HandleFunc("/api/pages/", s.requireAuth(s.handleAdminPublicPagesSlug))
 
 	return s.withRealIP(mux)
 }
 
 func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	if r.URL.Path == "/" {
+		// A configured default public page takes priority over the old homepage.
+		if pg, ok := s.db.getDefaultPublicPage(); ok {
+			http.Redirect(w, r, "/"+pg.Slug, http.StatusFound)
+			return
+		}
+		if s.cfg.PublicHomepage {
+			http.ServeFile(w, r, "public/home.html")
+			return
+		}
+		if s.isAuthenticated(r) {
+			http.Redirect(w, r, "/admin", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+
+	// Slug-based public page routing: /{slug}
+	slug := strings.TrimPrefix(r.URL.Path, "/")
+	if strings.Contains(slug, "/") {
+		// Sub-paths under unknown slugs are 404.
 		http.NotFound(w, r)
 		return
 	}
-	if s.cfg.PublicHomepage {
-		http.ServeFile(w, r, "public/home.html")
+	if _, ok := s.db.getPublicPageBySlug(slug); ok {
+		http.ServeFile(w, r, "public/page.html")
 		return
 	}
-	if s.isAuthenticated(r) {
-		http.Redirect(w, r, "/admin", http.StatusFound)
-		return
-	}
-	http.Redirect(w, r, "/login", http.StatusFound)
+	http.NotFound(w, r)
 }
 
 func (s *server) withRealIP(next http.Handler) http.Handler {
@@ -1075,6 +1227,210 @@ func (s *server) handleUI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeFile(w, r, "public/index.html")
+}
+
+// handlePublicPageData serves the event feed and metadata for a slug-based public page.
+func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	slug := strings.TrimPrefix(r.URL.Path, "/api/public/page/")
+	if slug == "" {
+		http.NotFound(w, r)
+		return
+	}
+	pg, ok := s.db.getPublicPageBySlug(slug)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	type sourceMeta struct {
+		Token       string `json:"token"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	type event struct {
+		Date   string `json:"date"`
+		Source string `json:"source"`
+		Title  string `json:"title"`
+	}
+
+	metas := make([]sourceMeta, 0, len(pg.Sources))
+	events := make([]event, 0, 24)
+	now := time.Now().UTC().Add(-2 * time.Hour)
+
+	for _, token := range pg.Sources {
+		src, ok := s.db.getSource(token)
+		if !ok || !src.Enabled {
+			continue
+		}
+		metas = append(metas, sourceMeta{Token: src.Token, Name: src.Name, Description: src.Description})
+
+		entry, fresh := s.cache.fresh(src.Token)
+		if !fresh {
+			body, etag, _, err := fetchUpstream(src, "")
+			if err == nil {
+				entry = cacheEntry{data: sanitizeICal(body), etag: etag, fetchedAt: time.Now()}
+				s.cache.set(src.Token, entry)
+			}
+		}
+		for _, block := range veventRe.FindAllString(entry.data, -1) {
+			dt := extractICalField(block, "DTSTART")
+			title := extractICalField(block, "SUMMARY")
+			if dt == "" || title == "" {
+				continue
+			}
+			tm, err := parseICalDate(dt)
+			if err != nil || tm.Before(now) {
+				continue
+			}
+			events = append(events, event{Date: tm.Format(time.RFC3339), Source: src.Name, Title: title})
+		}
+	}
+
+	slices.SortFunc(events, func(a, b event) int { return strings.Compare(a.Date, b.Date) })
+	if len(events) > 30 {
+		events = events[:30]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"title":       pg.Title,
+		"show_webcal": pg.ShowWebcal,
+		"sources":     metas,
+		"events":      events,
+		"generatedAt": time.Now().UTC(),
+		"version":     appVersion + " (" + appBranch + ")",
+	})
+}
+
+// handleAdminPublicPages handles GET (list) and POST (create) for public pages.
+func (s *server) handleAdminPublicPages(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.db.listPublicPages())
+
+	case http.MethodPost:
+		var body struct {
+			Slug       string   `json:"slug"`
+			Title      string   `json:"title"`
+			Sources    []string `json:"sources"`
+			IsDefault  bool     `json:"is_default"`
+			ShowWebcal bool     `json:"show_webcal_button"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+		if body.Title == "" {
+			http.Error(w, "title is required", http.StatusBadRequest)
+			return
+		}
+		if body.Slug == "" {
+			body.Slug = slugify(body.Title)
+		}
+		if !slugRe.MatchString(body.Slug) {
+			http.Error(w, "slug must be lowercase alphanumeric with hyphens", http.StatusBadRequest)
+			return
+		}
+		if reservedSlugs[body.Slug] {
+			http.Error(w, "slug conflicts with a built-in route", http.StatusBadRequest)
+			return
+		}
+		if _, exists := s.db.getPublicPageBySlug(body.Slug); exists {
+			http.Error(w, "slug already in use", http.StatusConflict)
+			return
+		}
+		// Enforce single default.
+		if body.IsDefault {
+			if _, hasDefault := s.db.getDefaultPublicPage(); hasDefault {
+				http.Error(w, "another page is already marked as default", http.StatusConflict)
+				return
+			}
+		}
+		if body.Sources == nil {
+			body.Sources = []string{}
+		}
+		pg := PublicPage{
+			Slug:       body.Slug,
+			Title:      body.Title,
+			Sources:    body.Sources,
+			IsDefault:  body.IsDefault,
+			ShowWebcal: body.ShowWebcal,
+		}
+		s.db.setPublicPage(pg)
+		log.Printf("[CalProxy] INFO: created public page %q (slug %s)", pg.Title, pg.Slug)
+		writeJSON(w, http.StatusCreated, pg)
+
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleAdminPublicPagesSlug handles GET/PUT/DELETE for a single public page by slug.
+func (s *server) handleAdminPublicPagesSlug(w http.ResponseWriter, r *http.Request) {
+	slug := strings.TrimPrefix(r.URL.Path, "/api/pages/")
+
+	switch r.Method {
+	case http.MethodGet:
+		pg, ok := s.db.getPublicPageBySlug(slug)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, pg)
+
+	case http.MethodPut:
+		pg, ok := s.db.getPublicPageBySlug(slug)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		var body struct {
+			Title      *string  `json:"title"`
+			Sources    []string `json:"sources"`
+			IsDefault  *bool    `json:"is_default"`
+			ShowWebcal *bool    `json:"show_webcal_button"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+		if body.Title != nil {
+			pg.Title = *body.Title
+		}
+		if body.Sources != nil {
+			pg.Sources = body.Sources
+		}
+		if body.ShowWebcal != nil {
+			pg.ShowWebcal = *body.ShowWebcal
+		}
+		if body.IsDefault != nil {
+			if *body.IsDefault && !pg.IsDefault {
+				// Ensure no other page is already the default.
+				if existing, hasDefault := s.db.getDefaultPublicPage(); hasDefault && existing.Slug != slug {
+					http.Error(w, "another page is already marked as default", http.StatusConflict)
+					return
+				}
+			}
+			pg.IsDefault = *body.IsDefault
+		}
+		s.db.setPublicPage(pg)
+		log.Printf("[CalProxy] INFO: updated public page %s", slug)
+		writeJSON(w, http.StatusOK, pg)
+
+	case http.MethodDelete:
+		if !s.db.deletePublicPage(slug) {
+			http.NotFound(w, r)
+			return
+		}
+		log.Printf("[CalProxy] INFO: deleted public page %s", slug)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *server) handlePublicHomepageData(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CalProxy</title>
+<style>
+:root{--bg:#0b1020;--card:#131a2b;--txt:#e6edf7;--muted:#9aa8c1;--border:#263149;--accent:#6aa8ff;}
+@media (prefers-color-scheme:light){:root{--bg:#f4f7fb;--card:#fff;--txt:#0f172a;--muted:#52607a;--border:#d8e0ef;--accent:#2563eb;}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;}
+header{display:flex;justify-content:space-between;align-items:center;padding:18px 22px;border-bottom:1px solid var(--border);}
+.container{max-width:980px;width:100%;margin:auto;padding:20px;flex:1;}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px;}
+.login-link{border:1px solid var(--border);padding:8px 12px;border-radius:10px;color:var(--txt);text-decoration:none;}
+.login-link:hover{border-color:var(--accent);color:var(--accent);}
+/* Webcal sources */
+.sources-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;}
+.source-chip{display:flex;align-items:center;gap:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;}
+.source-name{font-weight:500;}
+.source-desc{font-size:12px;color:var(--muted);}
+.webcal-btn{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;text-decoration:none;white-space:nowrap;line-height:1.6;}
+.webcal-btn:hover{opacity:0.85;}
+/* Calendar events */
+.group{margin-top:18px;}
+.date{font-weight:700;margin:12px 0 8px;color:var(--accent);}
+.item{display:flex;justify-content:space-between;padding:9px 10px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;gap:10px;}
+.source-tag{color:var(--muted);white-space:nowrap;}
+.empty{color:var(--muted);}
+/* Footer */
+footer{border-top:1px solid var(--border);padding:12px 22px;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);flex-shrink:0;}
+footer a{color:var(--muted);text-decoration:none;}
+footer a:hover{color:var(--accent);}
+</style>
+</head>
+<body>
+<header>
+  <strong id="page-title">CalProxy</strong>
+  <a class="login-link" href="/login">Login</a>
+</header>
+<div class="container">
+  <div id="sources-card" class="card" style="display:none">
+    <strong>Calendars</strong>
+    <div id="sources-list" class="sources-list"></div>
+  </div>
+  <div class="card">
+    <h2 style="margin:0 0 8px">Upcoming Events</h2>
+    <div id="calendar" class="empty">Loading events…</div>
+  </div>
+</div>
+<footer>
+  <a href="https://github.com/Chr0mX/CalProxy" target="_blank" rel="noopener noreferrer">CalProxy on GitHub</a>
+  <span id="version-info"></span>
+</footer>
+<script>
+(async function () {
+  const slug = window.location.pathname.replace(/^\/+/, '') || '';
+  const calRoot = document.getElementById('calendar');
+
+  let data;
+  try {
+    const res = await fetch('/api/public/page/' + encodeURIComponent(slug));
+    if (!res.ok) { calRoot.textContent = res.status === 404 ? 'Page not found.' : 'Failed to load page.'; return; }
+    data = await res.json();
+  } catch { calRoot.textContent = 'Unable to load page data.'; return; }
+
+  // Title
+  if (data.title) {
+    document.title = data.title + ' — CalProxy';
+    document.getElementById('page-title').textContent = data.title;
+  }
+
+  // Version footer
+  if (data.version) {
+    document.getElementById('version-info').textContent = data.version;
+  }
+
+  // Webcal source chips
+  if (data.show_webcal && Array.isArray(data.sources) && data.sources.length) {
+    const card = document.getElementById('sources-card');
+    const list = document.getElementById('sources-list');
+    card.style.display = '';
+    data.sources.forEach(function (src) {
+      const webcalUrl = 'webcal://' + window.location.host + '/cal/' + src.token;
+      const chip = document.createElement('div');
+      chip.className = 'source-chip';
+      chip.innerHTML =
+        '<div><div class="source-name">' + esc(src.name) + '</div>' +
+        (src.description ? '<div class="source-desc">' + esc(src.description) + '</div>' : '') +
+        '</div>' +
+        '<a class="webcal-btn" href="' + webcalUrl + '">Open in Webcal</a>';
+      list.appendChild(chip);
+    });
+  }
+
+  // Events
+  const events = data.events || [];
+  if (!events.length) { calRoot.textContent = 'No upcoming events.'; return; }
+
+  const groups = {};
+  events.forEach(function (e) {
+    const label = new Date(e.date).toLocaleDateString(undefined, {weekday: 'short', month: 'short', day: 'numeric'});
+    (groups[label] = groups[label] || []).push(e);
+  });
+
+  calRoot.innerHTML = '';
+  Object.entries(groups).forEach(function ([dateLabel, list]) {
+    const g = document.createElement('div');
+    g.className = 'group';
+    g.innerHTML = '<div class="date">' + esc(dateLabel) + '</div>';
+    list.forEach(function (ev) {
+      const t = new Date(ev.date).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+      const item = document.createElement('div');
+      item.className = 'item';
+      item.innerHTML =
+        '<div><div>' + esc(ev.title) + '</div><small class="source-tag">' + esc(t) + '</small></div>' +
+        '<div class="source-tag">' + esc(ev.source) + '</div>';
+      g.appendChild(item);
+    });
+    calRoot.appendChild(g);
+  });
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+})();
+</script>
+</body>
+</html>
