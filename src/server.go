@@ -2,16 +2,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/jpeg"
+	_ "image/png"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -184,6 +189,7 @@ type Source struct {
 	UpstreamURL string    `json:"upstreamUrl"`
 	Description string    `json:"description"`
 	Enabled     bool      `json:"enabled"`
+	Mode        string    `json:"mode,omitempty"` // "sonarr" | "radarr" | ""
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
@@ -192,6 +198,7 @@ type SourcePublic struct {
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	Enabled     bool      `json:"enabled"`
+	Mode        string    `json:"mode,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
@@ -201,6 +208,7 @@ func (s Source) public() SourcePublic {
 		Name:        s.Name,
 		Description: s.Description,
 		Enabled:     s.Enabled,
+		Mode:        s.Mode,
 		CreatedAt:   s.CreatedAt,
 	}
 }
@@ -562,19 +570,46 @@ func (c *cache) count() int {
 	return len(c.entries)
 }
 
+// ── Metadata cache ────────────────────────────────────────────────────────────
+
+// metaCache holds resolved media metadata (episodeId→seriesId, poster URLs).
+// Entries are permanent — IDs and poster URLs don't change.
+type metaCache struct {
+	mu      sync.RWMutex
+	entries map[string]string
+}
+
+func newMetaCache() *metaCache {
+	return &metaCache{entries: make(map[string]string)}
+}
+
+func (m *metaCache) get(key string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v, ok := m.entries[key]
+	return v, ok
+}
+
+func (m *metaCache) set(key, value string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries[key] = value
+}
+
 // ── iCal ──────────────────────────────────────────────────────────────────────
 
 var (
-	prodidRe   = regexp.MustCompile(`(?m)^PRODID:.*$`)
-	veventRe   = regexp.MustCompile(`(?s)BEGIN:VEVENT\r?\n.*?END:VEVENT\r?\n?`)
-	slugRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-	slugifyRe  = regexp.MustCompile(`[^a-z0-9]+`)
+	prodidRe  = regexp.MustCompile(`(?m)^PRODID:.*$`)
+	veventRe  = regexp.MustCompile(`(?s)BEGIN:VEVENT\r?\n.*?END:VEVENT\r?\n?`)
+	slugRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	slugifyRe = regexp.MustCompile(`[^a-z0-9]+`)
+	unfoldRe  = regexp.MustCompile(`\r?\n[ \t]`)
 )
 
 // reservedSlugs are URL segments already claimed by other routes.
 var reservedSlugs = map[string]bool{
 	"admin": true, "login": true, "logout": true,
-	"cal": true, "health": true, "api": true,
+	"cal": true, "health": true, "api": true, "img": true,
 }
 
 // appVersion and appBranch are injected at build time via -ldflags.
@@ -613,6 +648,15 @@ func normalizeTheme(t string) string {
 	t = strings.ToLower(strings.TrimSpace(t))
 	if validThemes[t] {
 		return t
+	}
+	return ""
+}
+
+// normalizeMode returns "sonarr" or "radarr" if valid, otherwise "".
+func normalizeMode(m string) string {
+	m = strings.ToLower(strings.TrimSpace(m))
+	if m == "sonarr" || m == "radarr" {
+		return m
 	}
 	return ""
 }
@@ -671,6 +715,7 @@ type server struct {
 	db       *store
 	cache    *cache
 	sessions *sessionStore
+	meta     *metaCache
 }
 
 func newServer(cfg config) *server {
@@ -679,6 +724,7 @@ func newServer(cfg config) *server {
 		db:       newStore(cfg.DataFile),
 		cache:    newCache(cfg.CacheTTL),
 		sessions: newSessionStore(),
+		meta:     newMetaCache(),
 	}
 }
 
@@ -712,6 +758,9 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/logout", s.handleLogout)
+
+	mux.HandleFunc("/img/sonarr/series/", s.handleImgSonarr)
+	mux.HandleFunc("/img/radarr/movie/", s.handleImgRadarr)
 
 	mux.HandleFunc("/api/public/homepage", s.handlePublicHomepageData)
 	mux.HandleFunc("/api/public/page/", s.handlePublicPageData)
@@ -992,6 +1041,316 @@ func serveICal(w http.ResponseWriter, name string, ttl int, body string) {
 	_, _ = io.WriteString(w, body)
 }
 
+// ── iCal text helpers ─────────────────────────────────────────────────────────
+
+// unfoldBlock removes iCal line-folding (CRLF + whitespace continuation).
+func unfoldBlock(block string) string {
+	return unfoldRe.ReplaceAllString(block, "")
+}
+
+// unescapeICal decodes iCal TEXT escape sequences.
+func unescapeICal(s string) string {
+	s = strings.ReplaceAll(s, `\\`, "\x00") // protect escaped backslash
+	s = strings.ReplaceAll(s, `\,`, ",")
+	s = strings.ReplaceAll(s, `\;`, ";")
+	s = strings.ReplaceAll(s, `\:`, ":")
+	s = strings.ReplaceAll(s, `\N`, "\n")
+	s = strings.ReplaceAll(s, `\n`, "\n")
+	s = strings.ReplaceAll(s, "\x00", `\`)
+	return strings.TrimSpace(s)
+}
+
+// ── Media source helpers ──────────────────────────────────────────────────────
+
+// findSourceByMode returns the first enabled source with the given mode.
+func (s *server) findSourceByMode(mode string) (Source, bool) {
+	for _, src := range s.db.listSources() {
+		if src.Enabled && src.Mode == mode {
+			return src, true
+		}
+	}
+	return Source{}, false
+}
+
+// extractAPICredentials derives the API base URL and key from a WebCal upstream URL.
+func extractAPICredentials(upstreamURL string) (baseURL, apiKey string) {
+	u, err := url.Parse(upstreamURL)
+	if err != nil {
+		return "", ""
+	}
+	return u.Scheme + "://" + u.Host, u.Query().Get("apikey")
+}
+
+// resolveImageURL returns a CalProxy image URL for the given VEVENT UID
+// based on the source mode.
+func (s *server) resolveImageURL(src Source, uid string) string {
+	switch src.Mode {
+	case "sonarr":
+		const prefix = "NzbDrone_episode_"
+		if strings.HasPrefix(uid, prefix) {
+			episodeID, err := strconv.Atoi(uid[len(prefix):])
+			if err != nil {
+				return ""
+			}
+			seriesID, err := s.sonarrSeriesID(src, episodeID)
+			if err != nil {
+				log.Printf("[CalProxy] WARN: sonarr episode %d lookup: %v", episodeID, err)
+				return ""
+			}
+			return fmt.Sprintf("/img/sonarr/series/%d.jpg", seriesID)
+		}
+	case "radarr":
+		const prefix = "Radarr_movie_"
+		if strings.HasPrefix(uid, prefix) {
+			rest := uid[len(prefix):]
+			if idx := strings.Index(rest, "_"); idx >= 0 {
+				rest = rest[:idx]
+			}
+			movieID, err := strconv.Atoi(rest)
+			if err != nil {
+				return ""
+			}
+			return fmt.Sprintf("/img/radarr/movie/%d.jpg", movieID)
+		}
+	}
+	return ""
+}
+
+// sonarrSeriesID looks up the seriesId for a Sonarr episodeId (cached).
+func (s *server) sonarrSeriesID(src Source, episodeID int) (int, error) {
+	key := fmt.Sprintf("sonarr_ep_%d", episodeID)
+	if v, ok := s.meta.get(key); ok {
+		id, _ := strconv.Atoi(v)
+		return id, nil
+	}
+	baseURL, apiKey := extractAPICredentials(src.UpstreamURL)
+	if baseURL == "" || apiKey == "" {
+		return 0, fmt.Errorf("cannot extract API credentials from source %s", src.Token)
+	}
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v3/episode/%d", baseURL, episodeID), nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("X-Api-Key", apiKey)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("sonarr episode %d returned %d", episodeID, resp.StatusCode)
+	}
+	var result struct {
+		SeriesID int `json:"seriesId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+	s.meta.set(key, strconv.Itoa(result.SeriesID))
+	return result.SeriesID, nil
+}
+
+// sonarrSeriesPosterURL returns the internal poster URL for a Sonarr series (cached).
+func (s *server) sonarrSeriesPosterURL(src Source, seriesID int) (string, error) {
+	key := fmt.Sprintf("sonarr_series_poster_%d", seriesID)
+	if v, ok := s.meta.get(key); ok {
+		return v, nil
+	}
+	baseURL, apiKey := extractAPICredentials(src.UpstreamURL)
+	if baseURL == "" || apiKey == "" {
+		return "", fmt.Errorf("cannot extract API credentials from source %s", src.Token)
+	}
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v3/series/%d", baseURL, seriesID), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("X-Api-Key", apiKey)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("sonarr series %d returned %d", seriesID, resp.StatusCode)
+	}
+	var result struct {
+		Images []struct {
+			CoverType string `json:"coverType"`
+			URL       string `json:"url"`
+			RemoteURL string `json:"remoteUrl"`
+		} `json:"images"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	for _, img := range result.Images {
+		if img.CoverType == "poster" {
+			posterURL := img.URL
+			if posterURL == "" {
+				posterURL = img.RemoteURL
+			}
+			if strings.HasPrefix(posterURL, "/") {
+				posterURL = baseURL + posterURL
+			}
+			s.meta.set(key, posterURL)
+			return posterURL, nil
+		}
+	}
+	return "", fmt.Errorf("no poster found for sonarr series %d", seriesID)
+}
+
+// radarrMoviePosterURL returns the internal poster URL for a Radarr movie (cached).
+func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
+	key := fmt.Sprintf("radarr_movie_poster_%d", movieID)
+	if v, ok := s.meta.get(key); ok {
+		return v, nil
+	}
+	baseURL, apiKey := extractAPICredentials(src.UpstreamURL)
+	if baseURL == "" || apiKey == "" {
+		return "", fmt.Errorf("cannot extract API credentials from source %s", src.Token)
+	}
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v3/movie/%d", baseURL, movieID), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("X-Api-Key", apiKey)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("radarr movie %d returned %d", movieID, resp.StatusCode)
+	}
+	var result struct {
+		Images []struct {
+			CoverType string `json:"coverType"`
+			URL       string `json:"url"`
+			RemoteURL string `json:"remoteUrl"`
+		} `json:"images"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	for _, img := range result.Images {
+		if img.CoverType == "poster" {
+			posterURL := img.URL
+			if posterURL == "" {
+				posterURL = img.RemoteURL
+			}
+			if strings.HasPrefix(posterURL, "/") {
+				posterURL = baseURL + posterURL
+			}
+			s.meta.set(key, posterURL)
+			return posterURL, nil
+		}
+	}
+	return "", fmt.Errorf("no poster found for radarr movie %d", movieID)
+}
+
+// proxyImage fetches an image from an internal URL and streams it as JPEG
+// with long-lived Cloudflare cache headers. PNG/GIF are re-encoded to JPEG.
+func (s *server) proxyImage(w http.ResponseWriter, imageURL, apiKey string) {
+	req, err := http.NewRequest(http.MethodGet, imageURL, nil)
+	if err != nil {
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+	if apiKey != "" {
+		req.Header.Set("X-Api-Key", apiKey)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		http.NotFound(w, req)
+		return
+	}
+	contentType := resp.Header.Get("Content-Type")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	if strings.HasPrefix(contentType, "image/jpeg") {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+	// Buffer non-JPEG for decode + re-encode
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		// Unknown format — stream raw bytes with original content-type
+		w.Header().Set("Content-Type", contentType)
+		_, _ = w.Write(raw)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	if err := jpeg.Encode(w, img, &jpeg.Options{Quality: 90}); err != nil {
+		log.Printf("[CalProxy] ERROR: JPEG encode: %v", err)
+	}
+}
+
+// ── Image proxy routes ────────────────────────────────────────────────────────
+
+func (s *server) handleImgSonarr(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/img/sonarr/series/")
+	rest = strings.TrimSuffix(rest, ".jpg")
+	seriesID, err := strconv.Atoi(rest)
+	if err != nil || seriesID <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	src, ok := s.findSourceByMode("sonarr")
+	if !ok {
+		http.Error(w, "No Sonarr source configured", http.StatusServiceUnavailable)
+		return
+	}
+	_, apiKey := extractAPICredentials(src.UpstreamURL)
+	posterURL, err := s.sonarrSeriesPosterURL(src, seriesID)
+	if err != nil {
+		log.Printf("[CalProxy] WARN: sonarr series %d poster: %v", seriesID, err)
+		http.NotFound(w, r)
+		return
+	}
+	s.proxyImage(w, posterURL, apiKey)
+}
+
+func (s *server) handleImgRadarr(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/img/radarr/movie/")
+	rest = strings.TrimSuffix(rest, ".jpg")
+	movieID, err := strconv.Atoi(rest)
+	if err != nil || movieID <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	src, ok := s.findSourceByMode("radarr")
+	if !ok {
+		http.Error(w, "No Radarr source configured", http.StatusServiceUnavailable)
+		return
+	}
+	_, apiKey := extractAPICredentials(src.UpstreamURL)
+	posterURL, err := s.radarrMoviePosterURL(src, movieID)
+	if err != nil {
+		log.Printf("[CalProxy] WARN: radarr movie %d poster: %v", movieID, err)
+		http.NotFound(w, r)
+		return
+	}
+	s.proxyImage(w, posterURL, apiKey)
+}
+
 // ── Admin routes ──────────────────────────────────────────────────────────────
 
 func (s *server) handleSources(w http.ResponseWriter, r *http.Request) {
@@ -1010,6 +1369,7 @@ func (s *server) handleSources(w http.ResponseWriter, r *http.Request) {
 			UpstreamURL string `json:"upstreamUrl"`
 			Description string `json:"description"`
 			Enabled     *bool  `json:"enabled"`
+			Mode        string `json:"mode"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -1034,10 +1394,11 @@ func (s *server) handleSources(w http.ResponseWriter, r *http.Request) {
 			UpstreamURL: body.UpstreamURL,
 			Description: body.Description,
 			Enabled:     enabled,
+			Mode:        normalizeMode(body.Mode),
 			CreatedAt:   time.Now().UTC(),
 		}
 		s.db.setSource(src)
-		log.Printf("[CalProxy] INFO: created source %q (token %s)", src.Name, src.Token)
+		log.Printf("[CalProxy] INFO: created source %q (token %s, mode %q)", src.Name, src.Token, src.Mode)
 		writeJSON(w, http.StatusCreated, src)
 
 	default:
@@ -1085,6 +1446,7 @@ func (s *server) handleSourcesToken(w http.ResponseWriter, r *http.Request) {
 			UpstreamURL *string `json:"upstreamUrl"`
 			Description *string `json:"description"`
 			Enabled     *bool   `json:"enabled"`
+			Mode        *string `json:"mode"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -1101,6 +1463,9 @@ func (s *server) handleSourcesToken(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Enabled != nil {
 			src.Enabled = *body.Enabled
+		}
+		if body.Mode != nil {
+			src.Mode = normalizeMode(*body.Mode)
 		}
 		s.db.setSource(src)
 		s.cache.evict(token)
@@ -1297,9 +1662,11 @@ func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 		Description string `json:"description"`
 	}
 	type event struct {
-		Date   string `json:"date"`
-		Source string `json:"source"`
-		Title  string `json:"title"`
+		Date        string `json:"date"`
+		Source      string `json:"source"`
+		Title       string `json:"title"`
+		Description string `json:"description,omitempty"`
+		ImageURL    string `json:"imageUrl,omitempty"`
 	}
 
 	resolvedTokens := s.resolvePageSources(pg.Sources)
@@ -1341,16 +1708,28 @@ func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		for _, block := range veventRe.FindAllString(entry.data, -1) {
-			dt := extractICalField(block, "DTSTART")
-			title := extractICalField(block, "SUMMARY")
-			if dt == "" || title == "" {
+			unfolded := unfoldBlock(block)
+			dt := extractICalField(unfolded, "DTSTART")
+			rawTitle := extractICalField(unfolded, "SUMMARY")
+			if dt == "" || rawTitle == "" {
 				continue
 			}
 			tm, err := parseICalDate(dt)
 			if err != nil || tm.Before(now) {
 				continue
 			}
-			events = append(events, event{Date: tm.Format(time.RFC3339), Source: src.Name, Title: title})
+			uid := extractICalField(unfolded, "UID")
+			rawDesc := extractICalField(unfolded, "DESCRIPTION")
+			ev := event{
+				Date:        tm.Format(time.RFC3339),
+				Source:      src.Name,
+				Title:       unescapeICal(rawTitle),
+				Description: unescapeICal(rawDesc),
+			}
+			if uid != "" && src.Mode != "" {
+				ev.ImageURL = s.resolveImageURL(src, uid)
+			}
+			events = append(events, ev)
 		}
 	}
 
@@ -1529,16 +1908,17 @@ func (s *server) handlePublicHomepageData(w http.ResponseWriter, r *http.Request
 			}
 		}
 		for _, block := range veventRe.FindAllString(entry.data, -1) {
-			dt := extractICalField(block, "DTSTART")
-			title := extractICalField(block, "SUMMARY")
-			if dt == "" || title == "" {
+			unfolded := unfoldBlock(block)
+			dt := extractICalField(unfolded, "DTSTART")
+			rawTitle := extractICalField(unfolded, "SUMMARY")
+			if dt == "" || rawTitle == "" {
 				continue
 			}
 			tm, err := parseICalDate(dt)
 			if err != nil || tm.Before(now) {
 				continue
 			}
-			events = append(events, event{Date: tm.Format(time.RFC3339), Source: src.Name, Title: title})
+			events = append(events, event{Date: tm.Format(time.RFC3339), Source: src.Name, Title: unescapeICal(rawTitle)})
 		}
 	}
 	slices.SortFunc(events, func(a, b event) int { return strings.Compare(a.Date, b.Date) })
