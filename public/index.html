@@ -294,6 +294,15 @@
     </div>
     <div id="mergeList"></div>
   </div>
+
+  <!-- ── Public Pages ───────────────────────────────────────────────────── -->
+  <div class="section">
+    <div class="toolbar">
+      <h2>Public Pages</h2>
+      <button class="primary" onclick="openAddPage()">+ Create Page</button>
+    </div>
+    <div id="pageList"></div>
+  </div>
 </main>
 
 <!-- ── Add / Edit Source modal ──────────────────────────────────────────────── -->
@@ -349,6 +358,40 @@
   </div>
 </div>
 
+<!-- ── Add / Edit Public Page modal ──────────────────────────────────────────── -->
+<div class="overlay" id="pageModal">
+  <div class="modal">
+    <h3 id="pageModalTitle">Create Public Page</h3>
+    <div class="error-banner" id="pageModalErr"></div>
+
+    <label for="pTitle">Title *</label>
+    <input type="text" id="pTitle" placeholder="Anime Calendar">
+
+    <label for="pSlug">Slug (auto-generated if blank)</label>
+    <input type="text" id="pSlug" placeholder="anime">
+
+    <label>Sources to expose</label>
+    <div class="source-checklist" id="pageSourceList">
+      <span style="color:var(--muted);font-size:11px">No sources available</span>
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="pIsDefault">
+      <label for="pIsDefault" style="margin:0">Default page (redirected to from /)</label>
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="pShowWebcal">
+      <label for="pShowWebcal" style="margin:0">Show webcal subscribe button</label>
+    </div>
+
+    <div class="modal-footer">
+      <button onclick="closePageModal()">Cancel</button>
+      <button class="primary" id="pageSaveBtn" onclick="savePage()">Save</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -356,8 +399,10 @@
 
 let editToken = null;
 let editMergeToken = null;
+let editPageSlug = null;
 let sources = [];
 let merges = [];
+let pages = [];
 
 // ── API helper ────────────────────────────────────────────────────────────────
 
@@ -382,12 +427,14 @@ async function api(method, path, body) {
 
 async function load() {
   try {
-    [sources, merges] = await Promise.all([
+    [sources, merges, pages] = await Promise.all([
       api('GET', '/api/sources'),
       api('GET', '/api/merges'),
+      api('GET', '/api/pages'),
     ]);
     render();
     renderMerges();
+    renderPages();
     loadStats();
   } catch (e) {
     if (e.message !== 'session expired') showError(e.message);
@@ -398,7 +445,7 @@ async function loadStats() {
   try {
     const s = await api('GET', '/api/stats');
     document.getElementById('statsLine').textContent =
-      `sources: ${s.sources}  merges: ${s.mergeGroups}  cached: ${s.cached}  ttl: ${s.cacheTtl}s`;
+      `sources: ${s.sources}  merges: ${s.mergeGroups}  pages: ${s.publicPages}  cached: ${s.cached}  ttl: ${s.cacheTtl}s`;
   } catch (_) {}
 }
 
@@ -783,6 +830,170 @@ function showMergeModalErr(msg) {
 
 function clearMergeModalErr() {
   const el = document.getElementById('mergeModalErr');
+  el.textContent = '';
+  el.classList.remove('show');
+}
+
+// ── Public Pages ──────────────────────────────────────────────────────────────
+
+function renderPages() {
+  const el = document.getElementById('pageList');
+  if (!pages.length) {
+    el.innerHTML = `<div class="empty"><div class="icon">🌐</div>No public pages yet — create one to share calendars publicly.</div>`;
+    return;
+  }
+  el.innerHTML = pages.map(p => pageCardHTML(p)).join('');
+}
+
+function pageCardHTML(p) {
+  const origin = window.location.origin;
+  const pageUrl = `${origin}/${p.slug}`;
+  const memberNames = (p.sources || []).map(tok => {
+    const src = sources.find(s => s.token === tok);
+    return src ? esc(src.name) : `<span style="color:var(--danger)">${tok.slice(0,8)}…</span>`;
+  });
+  const tagsHTML = memberNames.length
+    ? memberNames.map(n => `<span class="source-tag">${n}</span>`).join('')
+    : `<span style="color:var(--muted);font-size:11px">no sources selected</span>`;
+  const defaultBadge = p.is_default ? `<span class="badge merge">default</span> ` : '';
+  const webcalBadge  = p.show_webcal_button ? `<span class="badge enabled">webcal</span> ` : '';
+
+  return `
+  <div class="card" data-slug="${esc(p.slug)}">
+    <div class="card-header">
+      <div style="flex:1">
+        <div class="card-title">${esc(p.title)} ${defaultBadge}${webcalBadge}</div>
+        <div class="card-desc">/${esc(p.slug)}</div>
+      </div>
+      <div class="card-actions">
+        <button class="small" onclick="openEditPage('${esc(p.slug)}')">Edit</button>
+        <button class="small danger" onclick="deletePage('${esc(p.slug)}')">Delete</button>
+      </div>
+    </div>
+    <div class="card-meta">
+      <span>${(p.sources || []).length} source(s)</span>
+    </div>
+    <div class="source-tags">${tagsHTML}</div>
+    <div class="token-row">
+      <span class="token-label">URL</span>
+      <span class="token-value">${esc(pageUrl)}</span>
+      <div class="copy-group">
+        <button class="small" onclick="copy('${pageUrl}', this)">Copy URL</button>
+        <a class="btn" href="${pageUrl}" target="_blank">Open</a>
+      </div>
+    </div>
+  </div>`;
+}
+
+function buildPageSourceList(selectedTokens) {
+  const container = document.getElementById('pageSourceList');
+  if (!sources.length) {
+    container.innerHTML = `<span style="color:var(--muted);font-size:11px">No sources available — add a source first.</span>`;
+    return;
+  }
+  container.innerHTML = sources.map(s => `
+    <label class="source-check-item">
+      <input type="checkbox" value="${s.token}" ${selectedTokens.includes(s.token) ? 'checked' : ''}>
+      <label style="margin:0;color:var(--text)">${esc(s.name)}</label>
+    </label>
+  `).join('');
+}
+
+function getSelectedPageSources() {
+  return [...document.querySelectorAll('#pageSourceList input[type=checkbox]:checked')]
+    .map(cb => cb.value);
+}
+
+function openAddPage() {
+  editPageSlug = null;
+  document.getElementById('pageModalTitle').textContent = 'Create Public Page';
+  document.getElementById('pTitle').value = '';
+  document.getElementById('pSlug').value = '';
+  document.getElementById('pIsDefault').checked = false;
+  document.getElementById('pShowWebcal').checked = false;
+  buildPageSourceList([]);
+  clearPageModalErr();
+  document.getElementById('pageModal').classList.add('open');
+  document.getElementById('pTitle').focus();
+}
+
+async function openEditPage(slug) {
+  try {
+    const pg = await api('GET', `/api/pages/${slug}`);
+    editPageSlug = slug;
+    document.getElementById('pageModalTitle').textContent = 'Edit Public Page';
+    document.getElementById('pTitle').value = pg.title;
+    document.getElementById('pSlug').value = pg.slug;
+    document.getElementById('pIsDefault').checked = pg.is_default;
+    document.getElementById('pShowWebcal').checked = pg.show_webcal_button;
+    buildPageSourceList(pg.sources || []);
+    clearPageModalErr();
+    document.getElementById('pageModal').classList.add('open');
+    document.getElementById('pTitle').focus();
+  } catch (e) {
+    if (e.message !== 'session expired') showError(e.message);
+  }
+}
+
+function closePageModal() {
+  document.getElementById('pageModal').classList.remove('open');
+  editPageSlug = null;
+}
+
+async function savePage() {
+  const title      = document.getElementById('pTitle').value.trim();
+  const slug       = document.getElementById('pSlug').value.trim();
+  const is_default = document.getElementById('pIsDefault').checked;
+  const show_webcal_button = document.getElementById('pShowWebcal').checked;
+  const selectedSources = getSelectedPageSources();
+
+  if (!title) {
+    showPageModalErr('Title is required.');
+    return;
+  }
+
+  const btn = document.getElementById('pageSaveBtn');
+  btn.disabled = true;
+  try {
+    if (editPageSlug) {
+      await api('PUT', `/api/pages/${editPageSlug}`, { title, sources: selectedSources, is_default, show_webcal_button });
+      toast('Public page updated');
+    } else {
+      await api('POST', '/api/pages', { title, slug: slug || undefined, sources: selectedSources, is_default, show_webcal_button });
+      toast('Public page created');
+    }
+    closePageModal();
+    await load();
+  } catch (e) {
+    if (e.message !== 'session expired') showPageModalErr(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deletePage(slug) {
+  if (!confirm(`Delete public page "/${slug}"? This cannot be undone.`)) return;
+  try {
+    await api('DELETE', `/api/pages/${slug}`);
+    await load();
+    toast('Public page deleted');
+  } catch (e) {
+    if (e.message !== 'session expired') showError(e.message);
+  }
+}
+
+document.getElementById('pageModal').addEventListener('click', function(e) {
+  if (e.target === this) closePageModal();
+});
+
+function showPageModalErr(msg) {
+  const el = document.getElementById('pageModalErr');
+  el.textContent = msg;
+  el.classList.add('show');
+}
+
+function clearPageModalErr() {
+  const el = document.getElementById('pageModalErr');
   el.textContent = '';
   el.classList.remove('show');
 }

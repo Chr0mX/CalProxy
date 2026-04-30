@@ -1216,6 +1216,7 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sources":     len(s.db.listSources()),
 		"mergeGroups": len(s.db.listMergeGroups()),
+		"publicPages": len(s.db.listPublicPages()),
 		"cached":      s.cache.count(),
 		"cacheTtl":    s.cfg.CacheTTL,
 	})
