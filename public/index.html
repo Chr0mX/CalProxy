@@ -375,6 +375,15 @@
       <span style="color:var(--muted);font-size:11px">No sources available</span>
     </div>
 
+    <label for="pTheme">Theme</label>
+    <select id="pTheme">
+      <option value="">Default (blue)</option>
+      <option value="blue">Blue</option>
+      <option value="orange">Orange</option>
+      <option value="gold">Gold</option>
+      <option value="mixed">Mixed (Orange + Blue)</option>
+    </select>
+
     <div class="checkbox-row">
       <input type="checkbox" id="pIsDefault">
       <label for="pIsDefault" style="margin:0">Default page (redirected to from /)</label>
@@ -849,6 +858,13 @@ function pageCardHTML(p) {
   const origin = window.location.origin;
   const pageUrl = `${origin}/${p.slug}`;
   const memberNames = (p.sources || []).map(tok => {
+    if (tok.startsWith('merge:')) {
+      const mgToken = tok.slice(6);
+      const mg = merges.find(m => m.token === mgToken);
+      return mg
+        ? `<span title="merge group">${esc(mg.name)} <span style="color:var(--muted);font-size:10px">(merge)</span></span>`
+        : `<span style="color:var(--danger)">${esc(tok.slice(0,14))}…</span>`;
+    }
     const src = sources.find(s => s.token === tok);
     return src ? esc(src.name) : `<span style="color:var(--danger)">${tok.slice(0,8)}…</span>`;
   });
@@ -857,12 +873,13 @@ function pageCardHTML(p) {
     : `<span style="color:var(--muted);font-size:11px">no sources selected</span>`;
   const defaultBadge = p.is_default ? `<span class="badge merge">default</span> ` : '';
   const webcalBadge  = p.show_webcal_button ? `<span class="badge enabled">webcal</span> ` : '';
+  const themeBadge   = p.theme ? `<span class="badge" style="background:var(--muted);color:#fff">${esc(p.theme)}</span> ` : '';
 
   return `
   <div class="card" data-slug="${esc(p.slug)}">
     <div class="card-header">
       <div style="flex:1">
-        <div class="card-title">${esc(p.title)} ${defaultBadge}${webcalBadge}</div>
+        <div class="card-title">${esc(p.title)} ${defaultBadge}${webcalBadge}${themeBadge}</div>
         <div class="card-desc">/${esc(p.slug)}</div>
       </div>
       <div class="card-actions">
@@ -887,16 +904,28 @@ function pageCardHTML(p) {
 
 function buildPageSourceList(selectedTokens) {
   const container = document.getElementById('pageSourceList');
-  if (!sources.length) {
+  if (!sources.length && !merges.length) {
     container.innerHTML = `<span style="color:var(--muted);font-size:11px">No sources available — add a source first.</span>`;
     return;
   }
-  container.innerHTML = sources.map(s => `
+  const srcHTML = sources.map(s => `
     <label class="source-check-item">
       <input type="checkbox" value="${s.token}" ${selectedTokens.includes(s.token) ? 'checked' : ''}>
-      <label style="margin:0;color:var(--text)">${esc(s.name)}</label>
+      <span style="color:var(--text)">${esc(s.name)}</span>
     </label>
   `).join('');
+  const mergeHTML = merges.map(m => {
+    const val = 'merge:' + m.token;
+    return `
+    <label class="source-check-item">
+      <input type="checkbox" value="${val}" ${selectedTokens.includes(val) ? 'checked' : ''}>
+      <span style="color:var(--text)">${esc(m.name)} <span style="color:var(--muted);font-size:11px">(merge group)</span></span>
+    </label>`;
+  }).join('');
+  const sep = merges.length && sources.length
+    ? `<div style="color:var(--muted);font-size:11px;padding:4px 0 2px">Merge Groups</div>`
+    : '';
+  container.innerHTML = srcHTML + sep + mergeHTML;
 }
 
 function getSelectedPageSources() {
@@ -911,6 +940,7 @@ function openAddPage() {
   document.getElementById('pSlug').value = '';
   document.getElementById('pIsDefault').checked = false;
   document.getElementById('pShowWebcal').checked = false;
+  document.getElementById('pTheme').value = '';
   buildPageSourceList([]);
   clearPageModalErr();
   document.getElementById('pageModal').classList.add('open');
@@ -926,6 +956,7 @@ async function openEditPage(slug) {
     document.getElementById('pSlug').value = pg.slug;
     document.getElementById('pIsDefault').checked = pg.is_default;
     document.getElementById('pShowWebcal').checked = pg.show_webcal_button;
+    document.getElementById('pTheme').value = pg.theme || '';
     buildPageSourceList(pg.sources || []);
     clearPageModalErr();
     document.getElementById('pageModal').classList.add('open');
@@ -945,6 +976,7 @@ async function savePage() {
   const slug       = document.getElementById('pSlug').value.trim();
   const is_default = document.getElementById('pIsDefault').checked;
   const show_webcal_button = document.getElementById('pShowWebcal').checked;
+  const theme      = document.getElementById('pTheme').value || undefined;
   const selectedSources = getSelectedPageSources();
 
   if (!title) {
@@ -956,10 +988,10 @@ async function savePage() {
   btn.disabled = true;
   try {
     if (editPageSlug) {
-      await api('PUT', `/api/pages/${editPageSlug}`, { title, sources: selectedSources, is_default, show_webcal_button });
+      await api('PUT', `/api/pages/${editPageSlug}`, { title, sources: selectedSources, is_default, show_webcal_button, theme });
       toast('Public page updated');
     } else {
-      await api('POST', '/api/pages', { title, slug: slug || undefined, sources: selectedSources, is_default, show_webcal_button });
+      await api('POST', '/api/pages', { title, slug: slug || undefined, sources: selectedSources, is_default, show_webcal_button, theme });
       toast('Public page created');
     }
     closePageModal();

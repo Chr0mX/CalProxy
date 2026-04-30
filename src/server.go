@@ -217,9 +217,10 @@ type MergeGroup struct {
 type PublicPage struct {
 	Slug        string   `json:"slug"`
 	Title       string   `json:"title"`
-	Sources     []string `json:"sources"` // source tokens to expose
+	Sources     []string `json:"sources"` // source tokens or "merge:<mg-token>"
 	IsDefault   bool     `json:"is_default"`
 	ShowWebcal  bool     `json:"show_webcal_button"`
+	Theme       string   `json:"theme,omitempty"` // "orange"|"gold"|"blue"|"mixed"
 }
 
 // persistedData is the on-disk JSON format (v2).
@@ -601,6 +602,19 @@ func mergeICals(feeds []string, name string) string {
 	}
 	sb.WriteString("END:VCALENDAR\r\n")
 	return sb.String()
+}
+
+// ── Theme helpers ─────────────────────────────────────────────────────────────
+
+var validThemes = map[string]bool{"orange": true, "gold": true, "blue": true, "mixed": true}
+
+// normalizeTheme returns the theme name if valid, or empty string (meaning "use default").
+func normalizeTheme(t string) string {
+	t = strings.ToLower(strings.TrimSpace(t))
+	if validThemes[t] {
+		return t
+	}
+	return ""
 }
 
 // ── Upstream fetch ────────────────────────────────────────────────────────────
@@ -1230,6 +1244,36 @@ func (s *server) handleUI(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "public/index.html")
 }
 
+// resolvePageSources expands "merge:<token>" entries in a page's Sources list into
+// their constituent source tokens. Plain source tokens are passed through unchanged.
+// Duplicates are dropped and original ordering is preserved.
+// Unknown or disabled merge groups are skipped gracefully.
+func (s *server) resolvePageSources(sources []string) []string {
+	seen := make(map[string]bool, len(sources))
+	out := make([]string, 0, len(sources))
+	for _, entry := range sources {
+		if strings.HasPrefix(entry, "merge:") {
+			mgToken := strings.TrimPrefix(entry, "merge:")
+			mg, ok := s.db.getMergeGroup(mgToken)
+			if !ok || !mg.Enabled {
+				continue
+			}
+			for _, srcToken := range mg.Sources {
+				if !seen[srcToken] {
+					seen[srcToken] = true
+					out = append(out, srcToken)
+				}
+			}
+		} else {
+			if !seen[entry] {
+				seen[entry] = true
+				out = append(out, entry)
+			}
+		}
+	}
+	return out
+}
+
 // handlePublicPageData serves the event feed and metadata for a slug-based public page.
 func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1258,11 +1302,12 @@ func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 		Title  string `json:"title"`
 	}
 
-	metas := make([]sourceMeta, 0, len(pg.Sources))
+	resolvedTokens := s.resolvePageSources(pg.Sources)
+	metas := make([]sourceMeta, 0, len(resolvedTokens))
 	events := make([]event, 0, 24)
 	now := time.Now().UTC().Add(-2 * time.Hour)
 
-	for _, token := range pg.Sources {
+	for _, token := range resolvedTokens {
 		src, ok := s.db.getSource(token)
 		if !ok || !src.Enabled {
 			continue
@@ -1299,6 +1344,7 @@ func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"title":       pg.Title,
 		"show_webcal": pg.ShowWebcal,
+		"theme":       pg.Theme,
 		"sources":     metas,
 		"events":      events,
 		"generatedAt": time.Now().UTC(),
@@ -1319,6 +1365,7 @@ func (s *server) handleAdminPublicPages(w http.ResponseWriter, r *http.Request) 
 			Sources    []string `json:"sources"`
 			IsDefault  bool     `json:"is_default"`
 			ShowWebcal bool     `json:"show_webcal_button"`
+			Theme      string   `json:"theme"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -1359,6 +1406,7 @@ func (s *server) handleAdminPublicPages(w http.ResponseWriter, r *http.Request) 
 			Sources:    body.Sources,
 			IsDefault:  body.IsDefault,
 			ShowWebcal: body.ShowWebcal,
+			Theme:      normalizeTheme(body.Theme),
 		}
 		s.db.setPublicPage(pg)
 		log.Printf("[CalProxy] INFO: created public page %q (slug %s)", pg.Title, pg.Slug)
@@ -1393,6 +1441,7 @@ func (s *server) handleAdminPublicPagesSlug(w http.ResponseWriter, r *http.Reque
 			Sources    []string `json:"sources"`
 			IsDefault  *bool    `json:"is_default"`
 			ShowWebcal *bool    `json:"show_webcal_button"`
+			Theme      *string  `json:"theme"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -1406,6 +1455,9 @@ func (s *server) handleAdminPublicPagesSlug(w http.ResponseWriter, r *http.Reque
 		}
 		if body.ShowWebcal != nil {
 			pg.ShowWebcal = *body.ShowWebcal
+		}
+		if body.Theme != nil {
+			pg.Theme = normalizeTheme(*body.Theme)
 		}
 		if body.IsDefault != nil {
 			if *body.IsDefault && !pg.IsDefault {
