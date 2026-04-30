@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CalProxy Admin</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:      #0d1117;
+    --surface: #161b22;
+    --border:  #30363d;
+    --accent:  #58a6ff;
+    --danger:  #f85149;
+    --warn:    #d29922;
+    --ok:      #3fb950;
+    --text:    #c9d1d9;
+    --muted:   #8b949e;
+    --radius:  6px;
+    --mono:    'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  header h1 { font-size: 16px; color: var(--accent); letter-spacing: 0.5px; }
+  header .version { color: var(--muted); font-size: 11px; }
+  header .spacer { flex: 1; }
+  header .stats { color: var(--muted); font-size: 11px; }
+
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+
+  .toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+  .toolbar h2 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+
+  /* Buttons */
+  button {
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 5px 12px;
+    background: var(--surface);
+    color: var(--text);
+    transition: border-color 0.15s, color 0.15s;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
+  button.primary:hover { background: #79c0ff; border-color: #79c0ff; color: #0d1117; }
+  button.danger { border-color: var(--danger); color: var(--danger); }
+  button.danger:hover { background: var(--danger); color: #0d1117; }
+  button.small { padding: 3px 8px; font-size: 11px; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Cards */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 10px;
+    position: relative;
+  }
+  .card.disabled { opacity: 0.55; }
+  .card-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .card-title { font-size: 14px; font-weight: 600; color: var(--text); flex: 1; }
+  .card-desc { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .card-meta { color: var(--muted); font-size: 11px; margin-top: 8px; }
+  .card-meta span { margin-right: 16px; }
+  .badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+    border: 1px solid;
+  }
+  .badge.enabled  { color: var(--ok);   border-color: var(--ok);   }
+  .badge.disabled { color: var(--muted); border-color: var(--muted); }
+
+  .card-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+  .token-row {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    overflow: hidden;
+  }
+  .token-label { color: var(--muted); font-size: 10px; flex-shrink: 0; }
+  .token-value { color: var(--accent); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+  .copy-group { display: flex; gap: 4px; flex-shrink: 0; }
+
+  /* Empty state */
+  .empty {
+    text-align: center;
+    color: var(--muted);
+    padding: 60px 0;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+  }
+  .empty .icon { font-size: 32px; margin-bottom: 8px; }
+
+  /* Modal */
+  .overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .overlay.open { display: flex; }
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    width: 100%;
+    max-width: 520px;
+    margin: 16px;
+  }
+  .modal h3 { font-size: 14px; margin-bottom: 16px; color: var(--accent); }
+
+  label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 4px; margin-top: 12px; }
+  input[type=text], input[type=url], textarea {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 7px 10px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  input:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 60px; }
+
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .checkbox-row input { width: auto; }
+
+  .modal-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+
+  /* Toast */
+  #toast {
+    position: fixed; bottom: 24px; right: 24px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 16px;
+    font-size: 12px;
+    z-index: 200;
+    transition: opacity 0.3s;
+    opacity: 0;
+    pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+
+  .error-banner {
+    background: rgba(248,81,73,0.1);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    color: var(--danger);
+    margin-bottom: 16px;
+    font-size: 12px;
+    display: none;
+  }
+  .error-banner.show { display: block; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#x1F4C5; CalProxy</h1>
+  <span class="version">webcal reverse proxy</span>
+  <span class="spacer"></span>
+  <span class="stats" id="statsLine">loading…</span>
+</header>
+
+<main>
+  <div class="toolbar">
+    <h2>Sources</h2>
+    <button class="primary" onclick="openAdd()">+ Add Source</button>
+  </div>
+  <div class="error-banner" id="errBanner"></div>
+  <div id="sourceList"></div>
+</main>
+
+<!-- Add / Edit modal -->
+<div class="overlay" id="modal">
+  <div class="modal">
+    <h3 id="modalTitle">Add Source</h3>
+    <div class="error-banner" id="modalErr"></div>
+
+    <label for="fName">Name *</label>
+    <input type="text" id="fName" placeholder="Sonarr TV">
+
+    <label for="fUrl">Upstream URL *</label>
+    <input type="url" id="fUrl" placeholder="http://sonarr:8989/feed/v3/calendar/Sonarr.ics?apikey=…">
+
+    <label for="fDesc">Description</label>
+    <textarea id="fDesc" rows="2" placeholder="TV show air dates"></textarea>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="fEnabled" checked>
+      <label for="fEnabled" style="margin:0">Enabled</label>
+    </div>
+
+    <div class="modal-footer">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" id="saveBtn" onclick="saveSource()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+
+let editToken = null;
+let sources = [];
+
+// ── API helpers ───────────────────────────────────────────────────────────────
+
+async function api(method, path, body) {
+  const opts = {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+  };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    const text = await r.text().catch(() => r.statusText);
+    throw new Error(`${r.status}: ${text.trim()}`);
+  }
+  const ct = r.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return r.json();
+  return null;
+}
+
+// ── Load & render ─────────────────────────────────────────────────────────────
+
+async function load() {
+  try {
+    [sources] = await Promise.all([api('GET', '/api/sources')]);
+    render();
+    loadStats();
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+async function loadStats() {
+  try {
+    const s = await api('GET', '/api/stats');
+    document.getElementById('statsLine').textContent =
+      `sources: ${s.sources}  cached: ${s.cached}  ttl: ${s.cacheTtl}s`;
+  } catch (_) {}
+}
+
+function render() {
+  const el = document.getElementById('sourceList');
+  if (!sources.length) {
+    el.innerHTML = `<div class="empty"><div class="icon">📭</div>No sources yet — add one to get started.</div>`;
+    return;
+  }
+
+  // Sort newest first
+  const sorted = [...sources].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  el.innerHTML = sorted.map(s => cardHTML(s)).join('');
+}
+
+function cardHTML(s) {
+  const origin = window.location.origin;
+  const calUrl  = `${origin}/cal/${s.token}`;
+  const webcalUrl = calUrl.replace(/^https?/, 'webcal');
+  const tokenShort = s.token.slice(0, 8) + '…';
+  const date = new Date(s.createdAt).toLocaleDateString();
+  const badge = s.enabled
+    ? `<span class="badge enabled">enabled</span>`
+    : `<span class="badge disabled">disabled</span>`;
+
+  return `
+  <div class="card${s.enabled ? '' : ' disabled'}" data-token="${s.token}">
+    <div class="card-header">
+      <div style="flex:1">
+        <div class="card-title">${esc(s.name)} ${badge}</div>
+        ${s.description ? `<div class="card-desc">${esc(s.description)}</div>` : ''}
+      </div>
+      <div class="card-actions">
+        <button class="small" onclick="toggleEnabled('${s.token}', ${!s.enabled})">${s.enabled ? 'Disable' : 'Enable'}</button>
+        <button class="small" onclick="refreshCache('${s.token}')">Purge Cache</button>
+        <button class="small" onclick="openEdit('${s.token}')">Edit</button>
+        <button class="small danger" onclick="deleteSource('${s.token}')">Delete</button>
+      </div>
+    </div>
+    <div class="card-meta">
+      <span>token: <code>${tokenShort}</code></span>
+      <span>created: ${date}</span>
+    </div>
+    <div class="token-row">
+      <span class="token-label">https://</span>
+      <span class="token-value">${esc(calUrl)}</span>
+      <div class="copy-group">
+        <button class="small" onclick="copy('${calUrl}', this)">Copy HTTPS</button>
+        <button class="small" onclick="copy('${webcalUrl}', this)">Copy webcal://</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ── Actions ───────────────────────────────────────────────────────────────────
+
+async function toggleEnabled(token, enabled) {
+  try {
+    await api('PUT', `/api/sources/${token}`, { enabled });
+    await load();
+    toast(`Source ${enabled ? 'enabled' : 'disabled'}`);
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+async function refreshCache(token) {
+  try {
+    await api('POST', `/api/sources/${token}/refresh`);
+    toast('Cache purged');
+    loadStats();
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+async function deleteSource(token) {
+  if (!confirm('Delete this source? This cannot be undone.')) return;
+  try {
+    await api('DELETE', `/api/sources/${token}`);
+    await load();
+    toast('Source deleted');
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+
+function openAdd() {
+  editToken = null;
+  document.getElementById('modalTitle').textContent = 'Add Source';
+  document.getElementById('fName').value = '';
+  document.getElementById('fUrl').value = '';
+  document.getElementById('fDesc').value = '';
+  document.getElementById('fEnabled').checked = true;
+  clearModalErr();
+  document.getElementById('modal').classList.add('open');
+  document.getElementById('fName').focus();
+}
+
+async function openEdit(token) {
+  try {
+    const src = await api('GET', `/api/sources/${token}`);
+    editToken = token;
+    document.getElementById('modalTitle').textContent = 'Edit Source';
+    document.getElementById('fName').value = src.name;
+    document.getElementById('fUrl').value = src.upstreamUrl;
+    document.getElementById('fDesc').value = src.description || '';
+    document.getElementById('fEnabled').checked = src.enabled;
+    clearModalErr();
+    document.getElementById('modal').classList.add('open');
+    document.getElementById('fName').focus();
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+  editToken = null;
+}
+
+async function saveSource() {
+  const name = document.getElementById('fName').value.trim();
+  const upstreamUrl = document.getElementById('fUrl').value.trim();
+  const description = document.getElementById('fDesc').value.trim();
+  const enabled = document.getElementById('fEnabled').checked;
+
+  if (!name || !upstreamUrl) {
+    showModalErr('Name and Upstream URL are required.');
+    return;
+  }
+
+  const btn = document.getElementById('saveBtn');
+  btn.disabled = true;
+  try {
+    if (editToken) {
+      await api('PUT', `/api/sources/${editToken}`, { name, upstreamUrl, description, enabled });
+      toast('Source updated');
+    } else {
+      await api('POST', '/api/sources', { name, upstreamUrl, description, enabled });
+      toast('Source created');
+    }
+    closeModal();
+    await load();
+  } catch (e) {
+    showModalErr(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Close modal on overlay click
+document.getElementById('modal').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
+
+// ── Clipboard ─────────────────────────────────────────────────────────────────
+
+async function copy(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  } catch (_) {
+    prompt('Copy this URL:', text);
+  }
+}
+
+// ── Toasts & errors ───────────────────────────────────────────────────────────
+
+let toastTimer;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+function showError(msg) {
+  const el = document.getElementById('errBanner');
+  el.textContent = `Error: ${msg}`;
+  el.classList.add('show');
+}
+
+function showModalErr(msg) {
+  const el = document.getElementById('modalErr');
+  el.textContent = msg;
+  el.classList.add('show');
+}
+
+function clearModalErr() {
+  const el = document.getElementById('modalErr');
+  el.textContent = '';
+  el.classList.remove('show');
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+load();
+</script>
+</body>
+</html>

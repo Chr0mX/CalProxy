@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -380,6 +381,7 @@ func (s *server) handleCal(w http.ResponseWriter, r *http.Request) { /* unchange
 		return
 	}
 	token := strings.TrimPrefix(r.URL.Path, "/cal/")
+	_ = s.clientIP(r)
 	if token == "" {
 		http.NotFound(w, r)
 		return
@@ -534,6 +536,10 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleUI(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/admin" {
 		http.NotFound(w, r)
+		return
+	}
+	if !s.cfg.PublicHomepage.Enabled {
+		http.Redirect(w, r, "/admin", http.StatusFound)
 		return
 	}
 	http.ServeFile(w, r, "public/index.html")
