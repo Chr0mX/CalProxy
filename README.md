@@ -70,6 +70,8 @@ CalProxy will proxy it via a token URL that is safe to share.
 | `ADMIN_PASSWORD` | `changeme` | Password for HTTP Basic Auth (any username accepted) |
 | `DATA_FILE` | `./data/sources.json` | Path to the JSON persistence file |
 | `CACHE_TTL` | `300` | How long to cache upstream feeds, in seconds |
+| `TRUSTED_PROXIES` | _(empty)_ | Comma-separated list of trusted proxy IPs/CIDRs, e.g. `127.0.0.1,172.16.0.0/12` |
+| `PUBLIC_HOMEPAGE_REQUIRE_AUTH` | `false` | If `true`, `/` requires auth and shows admin UI |
 
 ---
 
@@ -170,3 +172,23 @@ docker build -t calproxy .
 ## Enhancement guide
 
 See `IMPLEMENTATION_GUIDE.md` for a complete implementation plan and production-oriented snippets for trusted reverse-proxy IP handling, public homepage flow, and calendar widget UI.
+
+
+## Public homepage and login flow
+
+- `/` serves a lightweight public homepage with feed + upcoming calendar widget.
+- Top-right **Login** button links to `/admin` (HTTP Basic Auth protected).
+- `/api/public/homepage` returns enabled source metadata for the homepage.
+
+## Reverse proxy real-IP hardening
+
+CalProxy now resolves real client IP only when the direct peer is trusted.
+
+1. Set trusted hops with `TRUSTED_PROXIES`, for example:
+   - `TRUSTED_PROXIES=127.0.0.1,172.16.0.0/12`
+2. If request remote address is trusted, CalProxy checks:
+   - `X-Forwarded-For` (first valid IP)
+   - fallback `X-Real-IP`
+3. If headers are missing/invalid/untrusted, CalProxy falls back to `RemoteAddr`.
+
+This prevents spoofed `X-Forwarded-For` from direct internet clients.

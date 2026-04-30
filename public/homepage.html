@@ -1,0 +1,28 @@
+<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>CalProxy Homepage</title>
+<style>
+:root{--bg:#0b0f14;--panel:#121820;--text:#dbe4ef;--muted:#9db0c7;--accent:#62a5ff;--border:#243142}
+@media (prefers-color-scheme: light){:root{--bg:#f3f7fb;--panel:#fff;--text:#152235;--muted:#58708d;--accent:#2e69d9;--border:#d5e1ef}}
+body{margin:0;font:14px system-ui;background:var(--bg);color:var(--text)}
+.wrap{max-width:980px;margin:0 auto;padding:24px}.top{display:flex;justify-content:space-between;align-items:center}
+.btn{border:1px solid var(--border);padding:8px 12px;border-radius:8px;color:var(--text);text-decoration:none}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}@media(max-width:860px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}
+.list .item{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px dashed var(--border)}.list .item:last-child{border-bottom:0}
+.muted{color:var(--muted)}
+</style></head><body><div class='wrap'>
+<div class='top'><h1>Public Calendar Homepage</h1><a class='btn' href='/admin'>Login</a></div>
+<div class='grid'>
+<section class='card'><h3>Configured Feeds</h3><div id='feeds' class='list muted'>Loading…</div></section>
+<section class='card'><h3>Upcoming Calendar</h3><div id='calendar' class='list muted'>Loading…</div></section>
+</div></div>
+<script>
+(async()=>{const res=await fetch('/api/public/homepage');const data=await res.json();const feeds=document.getElementById('feeds');const cal=document.getElementById('calendar');
+if(!data.sources||!data.sources.length){feeds.textContent='No public sources configured';cal.textContent='No upcoming items yet';return;}
+feeds.innerHTML=data.sources.map(s=>`<div class=item><span>${s.name}</span><span class=muted>${(s.description||'').slice(0,32)}</span></div>`).join('');
+const now=new Date();const events=[];
+for(const s of data.sources){try{const r=await fetch('/cal/'+s.token);const txt=await r.text();const lines=txt.split('\n');let date='';let summary='';for(const l of lines){if(l.startsWith('DTSTART')) date=l.split(':').pop(); if(l.startsWith('SUMMARY:')) summary=l.slice(8); if(l.startsWith('END:VEVENT')&&date){events.push({source:s.name,date,summary}); date=''; summary='';}}}catch{}}
+const parsed=events.map(e=>({...e,iso:e.date.length>=8?`${e.date.slice(0,4)}-${e.date.slice(4,6)}-${e.date.slice(6,8)}`:''})).filter(e=>e.iso).sort((a,b)=>a.iso.localeCompare(b.iso)).slice(0,20);
+cal.innerHTML=parsed.map(e=>`<div class=item><span>${e.iso}</span><span>${e.summary||e.source}</span></div>`).join('')||'No events in available feeds';
+})();
+</script></body></html>

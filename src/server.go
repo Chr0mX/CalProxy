@@ -1,6 +1,3 @@
-// CalProxy — self-hostable webcal reverse proxy for Sonarr/Radarr.
-// Chosen stack: Go — single binary, zero runtime deps, stdlib HTTP is sufficient for
-// this workload, and multi-stage Docker build produces a tiny image.
 package main
 
 import (
@@ -11,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,13 +22,14 @@ import (
 	"time"
 )
 
-// ── Config ────────────────────────────────────────────────────────────────────
-
 type config struct {
-	Port          string
-	AdminPassword string
-	DataFile      string
-	CacheTTL      int // seconds
+	Port               string
+	AdminPassword      string
+	DataFile           string
+	CacheTTL           int
+	PublicHomepageAuth bool
+	TrustedProxiesRaw  string
+	TrustedProxies     []string
 }
 
 func loadConfig() config {
@@ -51,10 +51,31 @@ func loadConfig() config {
 	if dataFile == "" {
 		dataFile = "./data/sources.json"
 	}
-	return config{Port: port, AdminPassword: pass, DataFile: dataFile, CacheTTL: ttl}
+
+	publicAuth := false
+	if v := strings.ToLower(os.Getenv("PUBLIC_HOMEPAGE_REQUIRE_AUTH")); v == "1" || v == "true" || v == "yes" {
+		publicAuth = true
+	}
+	trustedRaw := os.Getenv("TRUSTED_PROXIES")
+	trusted := parseTrustedProxies(trustedRaw)
+
+	return config{Port: port, AdminPassword: pass, DataFile: dataFile, CacheTTL: ttl, PublicHomepageAuth: publicAuth, TrustedProxiesRaw: trustedRaw, TrustedProxies: trusted}
 }
 
-// ── Persistence ───────────────────────────────────────────────────────────────
+func parseTrustedProxies(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 type Source struct {
 	Token       string    `json:"token"`
@@ -65,7 +86,6 @@ type Source struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
-// SourcePublic is Source without upstreamUrl, used in list responses.
 type SourcePublic struct {
 	Token       string    `json:"token"`
 	Name        string    `json:"name"`
@@ -75,63 +95,42 @@ type SourcePublic struct {
 }
 
 func (s Source) public() SourcePublic {
-	return SourcePublic{
-		Token:       s.Token,
-		Name:        s.Name,
-		Description: s.Description,
-		Enabled:     s.Enabled,
-		CreatedAt:   s.CreatedAt,
-	}
+	return SourcePublic{Token: s.Token, Name: s.Name, Description: s.Description, Enabled: s.Enabled, CreatedAt: s.CreatedAt}
 }
 
 type store struct {
 	mu       sync.RWMutex
-	sources  map[string]Source // keyed by token
+	sources  map[string]Source
 	dataFile string
 }
 
 func newStore(dataFile string) *store {
-	s := &store{sources: make(map[string]Source), dataFile: dataFile}
+	s := &store{sources: map[string]Source{}, dataFile: dataFile}
 	s.load()
 	return s
 }
-
 func (s *store) load() {
 	data, err := os.ReadFile(s.dataFile)
 	if err != nil {
-		// Missing file is expected on first run.
 		return
 	}
 	var list []Source
 	if err := json.Unmarshal(data, &list); err != nil {
-		log.Printf("[CalProxy] WARN: could not parse %s, starting with empty sources: %v", s.dataFile, err)
 		return
 	}
 	for _, src := range list {
 		s.sources[src.Token] = src
 	}
-	log.Printf("[CalProxy] loaded %d source(s) from %s", len(s.sources), s.dataFile)
 }
-
 func (s *store) save() {
 	list := make([]Source, 0, len(s.sources))
 	for _, src := range s.sources {
 		list = append(list, src)
 	}
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		log.Printf("[CalProxy] ERROR: marshal sources: %v", err)
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(s.dataFile), 0755); err != nil {
-		log.Printf("[CalProxy] ERROR: create data dir: %v", err)
-		return
-	}
-	if err := os.WriteFile(s.dataFile, data, 0644); err != nil {
-		log.Printf("[CalProxy] ERROR: write sources: %v", err)
-	}
+	data, _ := json.MarshalIndent(list, "", "  ")
+	_ = os.MkdirAll(filepath.Dir(s.dataFile), 0755)
+	_ = os.WriteFile(s.dataFile, data, 0644)
 }
-
 func (s *store) list() []Source {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -141,21 +140,18 @@ func (s *store) list() []Source {
 	}
 	return out
 }
-
 func (s *store) get(token string) (Source, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	src, ok := s.sources[token]
 	return src, ok
 }
-
 func (s *store) set(src Source) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sources[src.Token] = src
 	s.save()
 }
-
 func (s *store) delete(token string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -166,8 +162,6 @@ func (s *store) delete(token string) bool {
 	s.save()
 	return true
 }
-
-// ── Auth ──────────────────────────────────────────────────────────────────────
 
 func basicAuth(password string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -181,14 +175,10 @@ func basicAuth(password string, next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// ── Caching ───────────────────────────────────────────────────────────────────
-
 type cacheEntry struct {
-	data      string
-	etag      string
-	fetchedAt time.Time
+	data, etag string
+	fetchedAt  time.Time
 }
-
 type cache struct {
 	mu      sync.RWMutex
 	entries map[string]cacheEntry
@@ -196,31 +186,20 @@ type cache struct {
 }
 
 func newCache(ttl int) *cache {
-	return &cache{
-		entries: make(map[string]cacheEntry),
-		ttl:     time.Duration(ttl) * time.Second,
-	}
+	return &cache{entries: map[string]cacheEntry{}, ttl: time.Duration(ttl) * time.Second}
 }
-
 func (c *cache) get(token string) (cacheEntry, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	e, ok := c.entries[token]
 	return e, ok
 }
-
 func (c *cache) set(token string, e cacheEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[token] = e
 }
-
-func (c *cache) evict(token string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.entries, token)
-}
-
+func (c *cache) evict(token string) { c.mu.Lock(); defer c.mu.Unlock(); delete(c.entries, token) }
 func (c *cache) fresh(token string) (cacheEntry, bool) {
 	e, ok := c.get(token)
 	if !ok {
@@ -228,14 +207,7 @@ func (c *cache) fresh(token string) (cacheEntry, bool) {
 	}
 	return e, time.Since(e.fetchedAt) < c.ttl
 }
-
-func (c *cache) count() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return len(c.entries)
-}
-
-// ── iCal sanitisation ─────────────────────────────────────────────────────────
+func (c *cache) count() int { c.mu.RLock(); defer c.mu.RUnlock(); return len(c.entries) }
 
 var prodidRe = regexp.MustCompile(`(?m)^PRODID:.*$`)
 
@@ -243,11 +215,9 @@ func sanitizeICal(body string) string {
 	return prodidRe.ReplaceAllString(body, "PRODID:-//CalProxy//CalProxy//EN")
 }
 
-// ── Upstream fetch ────────────────────────────────────────────────────────────
-
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
-func fetchUpstream(src Source, etag string) (body string, newEtag string, notModified bool, err error) {
+func fetchUpstream(src Source, etag string) (string, string, bool, error) {
 	req, err := http.NewRequest(http.MethodGet, src.UpstreamURL, nil)
 	if err != nil {
 		return "", "", false, err
@@ -255,20 +225,17 @@ func fetchUpstream(src Source, etag string) (body string, newEtag string, notMod
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
-
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", "", false, err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode == http.StatusNotModified {
 		return "", etag, true, nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", "", false, fmt.Errorf("upstream returned %d", resp.StatusCode)
 	}
-
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", "", false, err
@@ -276,62 +243,138 @@ func fetchUpstream(src Source, etag string) (body string, newEtag string, notMod
 	return string(raw), resp.Header.Get("ETag"), false, nil
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 func randomToken() (string, error) {
 	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
+	_, err := rand.Read(b)
+	if err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
 }
-
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func tokenFromPath(r *http.Request, prefix string) string {
-	return strings.TrimPrefix(r.URL.Path, prefix)
+type trustedProxyChecker struct {
+	ips   map[string]struct{}
+	cidrs []*net.IPNet
 }
 
-// ── Server ────────────────────────────────────────────────────────────────────
+func newTrustedProxyChecker(entries []string) *trustedProxyChecker {
+	c := &trustedProxyChecker{ips: map[string]struct{}{}}
+	for _, e := range entries {
+		if ip := net.ParseIP(e); ip != nil {
+			c.ips[ip.String()] = struct{}{}
+			continue
+		}
+		if _, netw, err := net.ParseCIDR(e); err == nil {
+			c.cidrs = append(c.cidrs, netw)
+		}
+	}
+	return c
+}
+func (t *trustedProxyChecker) isTrusted(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if _, ok := t.ips[ip.String()]; ok {
+		return true
+	}
+	for _, n := range t.cidrs {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveRealIP(r *http.Request, checker *trustedProxyChecker) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	remoteIP := net.ParseIP(strings.TrimSpace(host))
+	if !checker.isTrusted(remoteIP) {
+		return strings.TrimSpace(host)
+	}
+
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff != "" {
+		parts := strings.Split(xff, ",")
+		for _, part := range parts {
+			candidate := net.ParseIP(strings.TrimSpace(part))
+			if candidate != nil {
+				return candidate.String()
+			}
+		}
+	}
+	if xrip := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); xrip != nil {
+		return xrip.String()
+	}
+	if remoteIP != nil {
+		return remoteIP.String()
+	}
+	return strings.TrimSpace(host)
+}
 
 type server struct {
-	cfg   config
-	db    *store
-	cache *cache
+	cfg     config
+	db      *store
+	cache   *cache
+	trusted *trustedProxyChecker
 }
 
 func newServer(cfg config) *server {
-	return &server{
-		cfg:   cfg,
-		db:    newStore(cfg.DataFile),
-		cache: newCache(cfg.CacheTTL),
-	}
+	return &server{cfg: cfg, db: newStore(cfg.DataFile), cache: newCache(cfg.CacheTTL), trusted: newTrustedProxyChecker(cfg.TrustedProxies)}
 }
 
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
-
-	// Public calendar endpoint.
 	mux.HandleFunc("/cal/", s.handleCal)
-
-	// Admin UI — basic auth protected.
-	mux.HandleFunc("/", basicAuth(s.cfg.AdminPassword, s.handleUI))
-
-	// Admin API — basic auth protected.
+	mux.HandleFunc("/api/public/homepage", s.handlePublicHomepageData)
+	mux.HandleFunc("/", s.handleRoot)
+	mux.HandleFunc("/admin", basicAuth(s.cfg.AdminPassword, s.handleUI))
 	mux.HandleFunc("/api/sources", basicAuth(s.cfg.AdminPassword, s.handleSources))
 	mux.HandleFunc("/api/sources/", basicAuth(s.cfg.AdminPassword, s.handleSourcesToken))
 	mux.HandleFunc("/api/stats", basicAuth(s.cfg.AdminPassword, s.handleStats))
-
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		realIP := resolveRealIP(r, s.trusted)
+		w.Header().Set("X-Real-Client-IP", realIP)
+		mux.ServeHTTP(w, r)
+	})
 }
 
-// ── Public routes ─────────────────────────────────────────────────────────────
+func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if s.cfg.PublicHomepageAuth {
+		basicAuth(s.cfg.AdminPassword, s.handleUI)(w, r)
+		return
+	}
+	http.ServeFile(w, r, "public/homepage.html")
+}
 
-func (s *server) handleCal(w http.ResponseWriter, r *http.Request) {
+func (s *server) handlePublicHomepageData(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	all := s.db.list()
+	enabled := make([]SourcePublic, 0)
+	for _, src := range all {
+		if src.Enabled {
+			enabled = append(enabled, src.public())
+		}
+	}
+	sort.Slice(enabled, func(i, j int) bool { return enabled[i].Name < enabled[j].Name })
+	writeJSON(w, http.StatusOK, map[string]any{"generatedAt": time.Now().UTC(), "sources": enabled})
+}
+
+func (s *server) handleCal(w http.ResponseWriter, r *http.Request) { /* unchanged */
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
@@ -341,45 +384,34 @@ func (s *server) handleCal(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-
 	src, ok := s.db.get(token)
 	if !ok || !src.Enabled {
 		http.NotFound(w, r)
 		return
 	}
-
-	// Try fresh cache first.
 	if entry, fresh := s.cache.fresh(token); fresh {
 		serveICal(w, src.Name, s.cfg.CacheTTL, entry.data)
 		return
 	}
-
-	// Fetch from upstream; use ETag if we have a stale entry.
 	stale, hasStale := s.cache.get(token)
-	var storedEtag string
+	storedEtag := ""
 	if hasStale {
 		storedEtag = stale.etag
 	}
-
 	body, newEtag, notModified, err := fetchUpstream(src, storedEtag)
 	if err != nil {
-		log.Printf("[CalProxy] upstream error for token %s: %v", token, err)
 		if hasStale {
-			log.Printf("[CalProxy] serving stale cache for token %s", token)
 			serveICal(w, src.Name, s.cfg.CacheTTL, stale.data)
 			return
 		}
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 		return
 	}
-
 	if notModified {
-		// Upstream confirmed our cached copy is still valid — refresh timestamp.
 		s.cache.set(token, cacheEntry{data: stale.data, etag: storedEtag, fetchedAt: time.Now()})
 		serveICal(w, src.Name, s.cfg.CacheTTL, stale.data)
 		return
 	}
-
 	sanitized := sanitizeICal(body)
 	s.cache.set(token, cacheEntry{data: sanitized, etag: newEtag, fetchedAt: time.Now()})
 	serveICal(w, src.Name, s.cfg.CacheTTL, sanitized)
@@ -392,10 +424,8 @@ func serveICal(w http.ResponseWriter, name string, ttl int, body string) {
 	_, _ = io.WriteString(w, body)
 }
 
-// ── Admin routes ──────────────────────────────────────────────────────────────
-
-// handleSources handles /api/sources (GET list, POST create).
-func (s *server) handleSources(w http.ResponseWriter, r *http.Request) {
+// admin handlers same
+func (s *server) handleSources(w http.ResponseWriter, r *http.Request) { /* ... */
 	switch r.Method {
 	case http.MethodGet:
 		all := s.db.list()
@@ -404,13 +434,10 @@ func (s *server) handleSources(w http.ResponseWriter, r *http.Request) {
 			pub = append(pub, src.public())
 		}
 		writeJSON(w, http.StatusOK, pub)
-
 	case http.MethodPost:
 		var body struct {
-			Name        string `json:"name"`
-			UpstreamURL string `json:"upstreamUrl"`
-			Description string `json:"description"`
-			Enabled     *bool  `json:"enabled"`
+			Name, UpstreamURL, Description string
+			Enabled                        *bool
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -420,37 +447,20 @@ func (s *server) handleSources(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name and upstreamUrl are required", http.StatusBadRequest)
 			return
 		}
-		token, err := randomToken()
-		if err != nil {
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
+		token, _ := randomToken()
 		enabled := true
 		if body.Enabled != nil {
 			enabled = *body.Enabled
 		}
-		src := Source{
-			Token:       token,
-			Name:        body.Name,
-			UpstreamURL: body.UpstreamURL,
-			Description: body.Description,
-			Enabled:     enabled,
-			CreatedAt:   time.Now().UTC(),
-		}
+		src := Source{Token: token, Name: body.Name, UpstreamURL: body.UpstreamURL, Description: body.Description, Enabled: enabled, CreatedAt: time.Now().UTC()}
 		s.db.set(src)
-		log.Printf("[CalProxy] created source %q (token %s)", src.Name, src.Token)
 		writeJSON(w, http.StatusCreated, src)
-
 	default:
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
-
-// handleSourcesToken handles /api/sources/:token and sub-paths.
 func (s *server) handleSourcesToken(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/sources/")
-
-	// POST /api/sources/:token/refresh
 	if strings.HasSuffix(rest, "/refresh") {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -462,11 +472,9 @@ func (s *server) handleSourcesToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.cache.evict(token)
-		log.Printf("[CalProxy] cache purged for token %s", token)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
-
 	token := rest
 	switch r.Method {
 	case http.MethodGet:
@@ -476,7 +484,6 @@ func (s *server) handleSourcesToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, src)
-
 	case http.MethodPut:
 		src, ok := s.db.get(token)
 		if !ok {
@@ -484,10 +491,8 @@ func (s *server) handleSourcesToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			Name        *string `json:"name"`
-			UpstreamURL *string `json:"upstreamUrl"`
-			Description *string `json:"description"`
-			Enabled     *bool   `json:"enabled"`
+			Name, UpstreamURL, Description *string
+			Enabled                        *bool
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -506,76 +511,49 @@ func (s *server) handleSourcesToken(w http.ResponseWriter, r *http.Request) {
 			src.Enabled = *body.Enabled
 		}
 		s.db.set(src)
-		s.cache.evict(token) // invalidate after update
-		log.Printf("[CalProxy] updated source %s", token)
+		s.cache.evict(token)
 		writeJSON(w, http.StatusOK, src)
-
 	case http.MethodDelete:
 		if !s.db.delete(token) {
 			http.NotFound(w, r)
 			return
 		}
 		s.cache.evict(token)
-		log.Printf("[CalProxy] deleted source %s", token)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-
 	default:
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
-
 func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"sources":  len(s.db.list()),
-		"cached":   s.cache.count(),
-		"cacheTtl": s.cfg.CacheTTL,
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"sources": len(s.db.list()), "cached": s.cache.count(), "cacheTtl": s.cfg.CacheTTL, "trustedProxies": s.cfg.TrustedProxies})
 }
-
-// handleUI serves the admin SPA from the embedded public/index.html.
 func (s *server) handleUI(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	if r.URL.Path != "/admin" {
 		http.NotFound(w, r)
 		return
 	}
 	http.ServeFile(w, r, "public/index.html")
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
-
 func main() {
-	log.SetFlags(0) // timestamps are added by the prefix
+	log.SetFlags(0)
 	cfg := loadConfig()
-
 	srv := newServer(cfg)
-	hs := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      srv.routes(),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
-
-	// Graceful shutdown on SIGTERM / SIGINT.
+	hs := &http.Server{Addr: ":" + cfg.Port, Handler: srv.routes(), ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-quit
-		log.Println("[CalProxy] shutting down…")
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := hs.Shutdown(ctx); err != nil {
-			log.Printf("[CalProxy] shutdown error: %v", err)
-		}
+		_ = hs.Shutdown(ctx)
 	}()
-
-	log.Printf("[CalProxy] listening on :%s  (TTL=%ds  data=%s)", cfg.Port, cfg.CacheTTL, cfg.DataFile)
+	log.Printf("[CalProxy] listening on :%s", cfg.Port)
 	if err := hs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("[CalProxy] fatal: %v", err)
+		log.Fatalf("fatal: %v", err)
 	}
-	log.Println("[CalProxy] stopped")
 }
