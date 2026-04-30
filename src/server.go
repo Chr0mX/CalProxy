@@ -1303,7 +1303,27 @@ func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resolvedTokens := s.resolvePageSources(pg.Sources)
-	metas := make([]sourceMeta, 0, len(resolvedTokens))
+
+	// Build webcal metas from the original sources list so that merge group entries
+	// produce a single subscribe URL pointing to /cal/<mg-token>, not individual sources.
+	metas := make([]sourceMeta, 0, len(pg.Sources))
+	for _, entry := range pg.Sources {
+		if strings.HasPrefix(entry, "merge:") {
+			mgToken := strings.TrimPrefix(entry, "merge:")
+			mg, ok := s.db.getMergeGroup(mgToken)
+			if !ok || !mg.Enabled {
+				continue
+			}
+			metas = append(metas, sourceMeta{Token: mg.Token, Name: mg.Name, Description: mg.Name})
+		} else {
+			src, ok := s.db.getSource(entry)
+			if !ok || !src.Enabled {
+				continue
+			}
+			metas = append(metas, sourceMeta{Token: src.Token, Name: src.Name, Description: src.Description})
+		}
+	}
+
 	events := make([]event, 0, 24)
 	now := time.Now().UTC().Add(-2 * time.Hour)
 
@@ -1312,8 +1332,6 @@ func (s *server) handlePublicPageData(w http.ResponseWriter, r *http.Request) {
 		if !ok || !src.Enabled {
 			continue
 		}
-		metas = append(metas, sourceMeta{Token: src.Token, Name: src.Name, Description: src.Description})
-
 		entry, fresh := s.cache.fresh(src.Token)
 		if !fresh {
 			body, etag, _, err := fetchUpstream(src, "")
