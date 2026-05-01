@@ -213,7 +213,7 @@ footer a:hover{color:var(--accent);}
 var _cp = {
   slug: window.location.pathname.replace(/^\/+/, '') || '',
   showPast: false,
-  selectedMonth: new Date().getMonth() + 1, // 1-12, default to current month
+  selectedMonth: 0, // 0 = All Months (default)
   initialized: false,
   showDescriptions: localStorage.getItem('calproxy-show-desc') === 'true',
 };
