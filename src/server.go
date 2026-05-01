@@ -1129,8 +1129,10 @@ func (s *server) resolveImageURL(src Source, uid string) string {
 			}
 			movieID, err := strconv.Atoi(rest)
 			if err != nil {
+				log.Printf("[CalProxy] WARN: radarr UID %q: cannot parse movie ID from %q", uid, rest)
 				return ""
 			}
+			log.Printf("[CalProxy] DEBUG: radarr UID %q → movie ID %d", uid, movieID)
 			return fmt.Sprintf("/img/radarr/movie/%d.jpg", movieID)
 		}
 	}
@@ -1249,10 +1251,16 @@ func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 		Images []struct {
 			CoverType string `json:"coverType"`
 			URL       string `json:"url"`
+			RemoteURL string `json:"remoteUrl"`
 		} `json:"images"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", err
+	}
+	log.Printf("[CalProxy] DEBUG: radarr movie %d API returned %d image(s)", movieID, len(result.Images))
+	for i, img := range result.Images {
+		log.Printf("[CalProxy] DEBUG: radarr movie %d image[%d]: coverType=%q url=%q remoteUrl=%q",
+			movieID, i, img.CoverType, img.URL, img.RemoteURL)
 	}
 	resolve := func(rawURL string) string {
 		if strings.HasPrefix(rawURL, "/") {
@@ -1264,22 +1272,34 @@ func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 		}
 		return rawURL
 	}
+	pick := func(img struct {
+		CoverType string `json:"coverType"`
+		URL       string `json:"url"`
+		RemoteURL string `json:"remoteUrl"`
+	}) string {
+		if img.URL != "" {
+			return resolve(img.URL)
+		}
+		return resolve(img.RemoteURL)
+	}
 	var firstCoverURL string
 	for _, img := range result.Images {
-		if img.URL == "" {
+		if img.URL == "" && img.RemoteURL == "" {
 			continue
 		}
 		if img.CoverType == "poster" {
-			if posterURL := resolve(img.URL); posterURL != "" {
+			if posterURL := pick(img); posterURL != "" {
+				log.Printf("[CalProxy] DEBUG: radarr movie %d → poster %s", movieID, posterURL)
 				s.meta.set(key, posterURL)
 				return posterURL, nil
 			}
 		}
 		if firstCoverURL == "" {
-			firstCoverURL = resolve(img.URL)
+			firstCoverURL = pick(img)
 		}
 	}
 	if firstCoverURL != "" {
+		log.Printf("[CalProxy] DEBUG: radarr movie %d → fallback cover %s", movieID, firstCoverURL)
 		s.meta.set(key, firstCoverURL)
 		return firstCoverURL, nil
 	}
@@ -1386,6 +1406,7 @@ func (s *server) handleImgRadarr(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	log.Printf("[CalProxy] DEBUG: radarr movie %d proxying image %s", movieID, posterURL)
 	s.proxyImage(w, posterURL, apiKey)
 }
 
