@@ -1256,7 +1256,11 @@ func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 	}
 	resolve := func(rawURL string) string {
 		if strings.HasPrefix(rawURL, "/") {
-			return baseURL + rawURL
+			rawURL = baseURL + rawURL
+		}
+		// Validate the result is a parseable absolute URL before returning it.
+		if u, err := url.Parse(rawURL); err != nil || u.Host == "" {
+			return ""
 		}
 		return rawURL
 	}
@@ -1266,9 +1270,10 @@ func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 			continue
 		}
 		if img.CoverType == "poster" {
-			posterURL := resolve(img.URL)
-			s.meta.set(key, posterURL)
-			return posterURL, nil
+			if posterURL := resolve(img.URL); posterURL != "" {
+				s.meta.set(key, posterURL)
+				return posterURL, nil
+			}
 		}
 		if firstCoverURL == "" {
 			firstCoverURL = resolve(img.URL)
