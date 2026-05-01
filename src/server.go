@@ -1220,9 +1220,9 @@ func (s *server) sonarrSeriesPosterURL(src Source, seriesID int) (string, error)
 	return "", fmt.Errorf("no poster found for sonarr series %d", seriesID)
 }
 
-// radarrMoviePosterURL returns the MediaCover API URL for a Radarr movie poster (cached).
-// It prefers poster.jpg via the MediaCover API; falls back to the first available
-// cover derived from the movie API when poster.jpg is not present.
+// radarrMoviePosterURL returns the poster URL for a Radarr movie (cached).
+// It uses the URL provided directly by the movie API, preferring coverType "poster"
+// and falling back to the first available image.
 func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 	key := fmt.Sprintf("radarr_movie_poster_%d", movieID)
 	if v, ok := s.meta.get(key); ok {
@@ -1232,23 +1232,6 @@ func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 	if baseURL == "" || apiKey == "" {
 		return "", fmt.Errorf("cannot extract API credentials from source %s", src.Token)
 	}
-
-	// Prefer poster.jpg directly via the MediaCover API (HEAD to verify existence).
-	posterURL := fmt.Sprintf("%s/api/v3/mediacover/%d/poster.jpg", baseURL, movieID)
-	headReq, err := http.NewRequest(http.MethodHead, posterURL, nil)
-	if err == nil {
-		headReq.Header.Set("X-Api-Key", apiKey)
-		if headResp, herr := httpClient.Do(headReq); herr == nil {
-			headResp.Body.Close()
-			if headResp.StatusCode == http.StatusOK {
-				s.meta.set(key, posterURL)
-				return posterURL, nil
-			}
-		}
-	}
-
-	// Fallback: query movie API for available covers and build a MediaCover URL
-	// from the filename, preferring cover type "poster" then any first cover.
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v3/movie/%d", baseURL, movieID), nil)
 	if err != nil {
 		return "", err
@@ -1271,24 +1254,24 @@ func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", err
 	}
+	resolve := func(rawURL string) string {
+		if strings.HasPrefix(rawURL, "/") {
+			return baseURL + rawURL
+		}
+		return rawURL
+	}
 	var firstCoverURL string
 	for _, img := range result.Images {
-		parts := strings.Split(img.URL, "/")
-		filename := parts[len(parts)-1]
-		// Radarr appends a cache-busting query string (e.g. ?lastWrite=...) — strip it.
-		if idx := strings.IndexByte(filename, '?'); idx >= 0 {
-			filename = filename[:idx]
-		}
-		if filename == "" {
+		if img.URL == "" {
 			continue
 		}
-		coverURL := fmt.Sprintf("%s/api/v3/mediacover/%d/%s", baseURL, movieID, filename)
 		if img.CoverType == "poster" {
-			s.meta.set(key, coverURL)
-			return coverURL, nil
+			posterURL := resolve(img.URL)
+			s.meta.set(key, posterURL)
+			return posterURL, nil
 		}
 		if firstCoverURL == "" {
-			firstCoverURL = coverURL
+			firstCoverURL = resolve(img.URL)
 		}
 	}
 	if firstCoverURL != "" {
