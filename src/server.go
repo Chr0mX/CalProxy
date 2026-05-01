@@ -1275,6 +1275,10 @@ func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 	for _, img := range result.Images {
 		parts := strings.Split(img.URL, "/")
 		filename := parts[len(parts)-1]
+		// Radarr appends a cache-busting query string (e.g. ?lastWrite=...) — strip it.
+		if idx := strings.IndexByte(filename, '?'); idx >= 0 {
+			filename = filename[:idx]
+		}
 		if filename == "" {
 			continue
 		}
