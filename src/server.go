@@ -1222,19 +1222,78 @@ func (s *server) sonarrSeriesPosterURL(src Source, seriesID int) (string, error)
 	return "", fmt.Errorf("no poster found for sonarr series %d", seriesID)
 }
 
+// radarrImage is the image entry shape returned by Radarr's movie API.
+type radarrImage struct {
+	CoverType string `json:"coverType"`
+	URL       string `json:"url"`
+	RemoteURL string `json:"remoteUrl"`
+}
+
+// resolveRadarrPosterURL picks the best image URL from a Radarr images slice.
+// Prefers coverType=="poster"; falls back to the first valid image.
+// Relative URLs (starting with "/") are prefixed with baseURL.
+// URLs that do not parse as a valid absolute URL are skipped.
+func resolveRadarrPosterURL(images []radarrImage, baseURL string) string {
+	resolve := func(raw string) string {
+		if strings.HasPrefix(raw, "/") {
+			raw = baseURL + raw
+		}
+		if u, err := url.Parse(raw); err != nil || u.Host == "" {
+			return ""
+		}
+		return raw
+	}
+	pick := func(img radarrImage) string {
+		if img.URL != "" {
+			return resolve(img.URL)
+		}
+		return resolve(img.RemoteURL)
+	}
+	var first string
+	for _, img := range images {
+		if img.URL == "" && img.RemoteURL == "" {
+			continue
+		}
+		if img.CoverType == "poster" {
+			if u := pick(img); u != "" {
+				return u
+			}
+		}
+		if first == "" {
+			first = pick(img)
+		}
+	}
+	return first
+}
+
 // radarrMoviePosterURL returns the poster URL for a Radarr movie (cached).
-// It uses the URL provided directly by the movie API, preferring coverType "poster"
-// and falling back to the first available image.
+// On first cache miss it attempts a bulk prefetch of all movies via
+// /api/v3/movie; individual lookup is used as a fallback for movies
+// added after the prefetch.
 func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 	key := fmt.Sprintf("radarr_movie_poster_%d", movieID)
 	if v, ok := s.meta.get(key); ok {
 		return v, nil
 	}
+
+	// On first miss, bulk-load all movie posters in a single API call.
+	prefetchKey := fmt.Sprintf("radarr_prefetch_done_%s", src.Token)
+	if _, done := s.meta.get(prefetchKey); !done {
+		if err := s.radarrPrefetchPosters(src); err != nil {
+			log.Printf("[CalProxy] WARN: radarr bulk prefetch failed, falling back to per-movie lookup: %v", err)
+		} else if v, ok := s.meta.get(key); ok {
+			return v, nil
+		}
+	}
+
+	// Fallback: individual movie lookup (handles movies added after prefetch).
 	baseURL, apiKey := extractAPICredentials(src.UpstreamURL)
 	if baseURL == "" || apiKey == "" {
 		return "", fmt.Errorf("cannot extract API credentials from source %s", src.Token)
 	}
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v3/movie/%d", baseURL, movieID), nil)
+	apiURL := fmt.Sprintf("%s/api/v3/movie/%d", baseURL, movieID)
+	log.Printf("[CalProxy] DEBUG: radarr movie %d fetching %s", movieID, apiURL)
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -1244,15 +1303,14 @@ func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("radarr movie %d not found (404) — ID may not exist in Radarr database", movieID)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("radarr movie %d returned %d", movieID, resp.StatusCode)
+		return "", fmt.Errorf("radarr movie %d returned HTTP %d", movieID, resp.StatusCode)
 	}
 	var result struct {
-		Images []struct {
-			CoverType string `json:"coverType"`
-			URL       string `json:"url"`
-			RemoteURL string `json:"remoteUrl"`
-		} `json:"images"`
+		Images []radarrImage `json:"images"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", err
@@ -1262,48 +1320,63 @@ func (s *server) radarrMoviePosterURL(src Source, movieID int) (string, error) {
 		log.Printf("[CalProxy] DEBUG: radarr movie %d image[%d]: coverType=%q url=%q remoteUrl=%q",
 			movieID, i, img.CoverType, img.URL, img.RemoteURL)
 	}
-	resolve := func(rawURL string) string {
-		if strings.HasPrefix(rawURL, "/") {
-			rawURL = baseURL + rawURL
-		}
-		// Validate the result is a parseable absolute URL before returning it.
-		if u, err := url.Parse(rawURL); err != nil || u.Host == "" {
-			return ""
-		}
-		return rawURL
+	if len(result.Images) == 0 {
+		return "", fmt.Errorf("radarr movie %d exists but has no artwork", movieID)
 	}
-	pick := func(img struct {
-		CoverType string `json:"coverType"`
-		URL       string `json:"url"`
-		RemoteURL string `json:"remoteUrl"`
-	}) string {
-		if img.URL != "" {
-			return resolve(img.URL)
-		}
-		return resolve(img.RemoteURL)
+	posterURL := resolveRadarrPosterURL(result.Images, baseURL)
+	if posterURL == "" {
+		return "", fmt.Errorf("radarr movie %d: no valid poster URL in API response", movieID)
 	}
-	var firstCoverURL string
-	for _, img := range result.Images {
-		if img.URL == "" && img.RemoteURL == "" {
-			continue
+	log.Printf("[CalProxy] DEBUG: radarr movie %d → poster %s", movieID, posterURL)
+	s.meta.set(key, posterURL)
+	return posterURL, nil
+}
+
+// radarrPrefetchPosters bulk-loads all Radarr movie poster URLs via
+// GET /api/v3/movie and populates the meta cache in one request.
+// Subsequent radarrMoviePosterURL calls hit the cache for any known movie.
+func (s *server) radarrPrefetchPosters(src Source) error {
+	baseURL, apiKey := extractAPICredentials(src.UpstreamURL)
+	if baseURL == "" || apiKey == "" {
+		return fmt.Errorf("cannot extract API credentials from source %s", src.Token)
+	}
+	apiURL := fmt.Sprintf("%s/api/v3/movie", baseURL)
+	log.Printf("[CalProxy] DEBUG: radarr prefetch fetching %s", apiURL)
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Api-Key", apiKey)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("radarr /api/v3/movie returned HTTP %d", resp.StatusCode)
+	}
+	var movies []struct {
+		ID     int           `json:"id"`
+		Images []radarrImage `json:"images"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&movies); err != nil {
+		return err
+	}
+	log.Printf("[CalProxy] DEBUG: radarr prefetch loaded %d movie(s)", len(movies))
+	cached := 0
+	for _, movie := range movies {
+		key := fmt.Sprintf("radarr_movie_poster_%d", movie.ID)
+		if _, ok := s.meta.get(key); ok {
+			continue // already populated by a prior individual lookup
 		}
-		if img.CoverType == "poster" {
-			if posterURL := pick(img); posterURL != "" {
-				log.Printf("[CalProxy] DEBUG: radarr movie %d → poster %s", movieID, posterURL)
-				s.meta.set(key, posterURL)
-				return posterURL, nil
-			}
-		}
-		if firstCoverURL == "" {
-			firstCoverURL = pick(img)
+		if u := resolveRadarrPosterURL(movie.Images, baseURL); u != "" {
+			s.meta.set(key, u)
+			cached++
 		}
 	}
-	if firstCoverURL != "" {
-		log.Printf("[CalProxy] DEBUG: radarr movie %d → fallback cover %s", movieID, firstCoverURL)
-		s.meta.set(key, firstCoverURL)
-		return firstCoverURL, nil
-	}
-	return "", fmt.Errorf("no cover found for radarr movie %d", movieID)
+	log.Printf("[CalProxy] DEBUG: radarr prefetch cached posters for %d/%d movie(s)", cached, len(movies))
+	s.meta.set(fmt.Sprintf("radarr_prefetch_done_%s", src.Token), "1")
+	return nil
 }
 
 // proxyImage fetches an image from an internal URL and streams it as JPEG
