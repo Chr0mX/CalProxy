@@ -1239,10 +1239,13 @@ func resolveRadarrPosterURL(images []radarrImage, baseURL string) string {
 		if strings.HasPrefix(raw, "/") {
 			raw = baseURL + raw
 		}
-		if u, err := url.Parse(raw); err != nil || u.Host == "" {
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
 			return ""
 		}
-		return raw
+		u.RawQuery = ""
+		u.Fragment = ""
+		return u.String()
 	}
 	pick := func(img radarrImage) string {
 		if img.URL != "" {
