@@ -1292,8 +1292,10 @@ func (s *server) radarrPrefetchPosters(src Source) error {
 		return fmt.Errorf("radarr /api/v3/movie returned HTTP %d", resp.StatusCode)
 	}
 	var movies []struct {
-		MovieMetadataID int           `json:"movieMetadataId"`
-		Images          []radarrImage `json:"images"`
+		AlternateTitles []struct {
+			MovieMetadataID int `json:"movieMetadataId"`
+		} `json:"alternateTitles"`
+		Images []radarrImage `json:"images"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&movies); err != nil {
 		return err
@@ -1301,14 +1303,18 @@ func (s *server) radarrPrefetchPosters(src Source) error {
 	log.Printf("[CalProxy] DEBUG: radarr prefetch loaded %d movie(s)", len(movies))
 	cached := 0
 	for _, movie := range movies {
-		if movie.MovieMetadataID <= 0 {
+		if len(movie.AlternateTitles) == 0 {
+			continue
+		}
+		metadataID := movie.AlternateTitles[0].MovieMetadataID
+		if metadataID <= 0 {
 			continue
 		}
 		posterURL := resolveRadarrPosterURL(movie.Images, baseURL)
 		if posterURL == "" {
 			continue
 		}
-		metaKey := fmt.Sprintf("radarr_meta_poster_%d", movie.MovieMetadataID)
+		metaKey := fmt.Sprintf("radarr_meta_poster_%d", metadataID)
 		if _, ok := s.meta.get(metaKey); !ok {
 			s.meta.set(metaKey, posterURL)
 			cached++
@@ -1359,23 +1365,31 @@ func (s *server) radarrMoviePosterURLFromMetadataID(src Source, metadataID int) 
 		return "", fmt.Errorf("radarr /api/v3/movie returned HTTP %d", resp.StatusCode)
 	}
 	var movies []struct {
-		ID              int           `json:"id"`
-		MovieMetadataID int           `json:"movieMetadataId"`
-		Images          []radarrImage `json:"images"`
+		AlternateTitles []struct {
+			MovieMetadataID int `json:"movieMetadataId"`
+		} `json:"alternateTitles"`
+		Images []radarrImage `json:"images"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&movies); err != nil {
 		return "", err
 	}
 	for _, movie := range movies {
-		if movie.MovieMetadataID != metadataID {
+		matched := false
+		for _, at := range movie.AlternateTitles {
+			if at.MovieMetadataID == metadataID {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			continue
 		}
 		posterURL := resolveRadarrPosterURL(movie.Images, baseURL)
 		if posterURL == "" {
-			return "", fmt.Errorf("radarr metadataId %d (movie.id=%d): no valid poster URL", metadataID, movie.ID)
+			return "", fmt.Errorf("radarr metadataId %d: no valid poster URL in API response", metadataID)
 		}
 		s.meta.set(key, posterURL)
-		log.Printf("[CalProxy] DEBUG: radarr metadataId %d → movie.id %d → poster %s", metadataID, movie.ID, posterURL)
+		log.Printf("[CalProxy] DEBUG: radarr metadataId %d → poster %s", metadataID, posterURL)
 		return posterURL, nil
 	}
 	return "", fmt.Errorf("radarr metadataId %d not found among %d movies", metadataID, len(movies))
