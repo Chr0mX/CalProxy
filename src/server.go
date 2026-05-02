@@ -1411,13 +1411,14 @@ func (s *server) proxyImage(w http.ResponseWriter, imageURL, apiKey string) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("[CalProxy] WARN: proxyImage: HTTP %d from %s (apiKey set: %v)", resp.StatusCode, req.URL.Host, apiKey != "")
 		http.NotFound(w, req)
 		return
 	}
 	contentType := resp.Header.Get("Content-Type")
 	// Reject HTML — this is a login redirect, not an image.
 	if strings.Contains(contentType, "text/html") {
-		log.Printf("[CalProxy] WARN: proxyImage: got HTML response — likely an auth redirect")
+		log.Printf("[CalProxy] WARN: proxyImage: got HTML (status 200) from %s (apiKey set: %v) — auth redirect", req.URL.Host, apiKey != "")
 		http.NotFound(w, req)
 		return
 	}
