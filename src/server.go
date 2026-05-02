@@ -1384,8 +1384,19 @@ func (s *server) radarrMoviePosterURLFromMetadataID(src Source, metadataID int) 
 }
 
 // proxyImage fetches an image from an internal URL and streams it as JPEG
-// with long-lived Cloudflare cache headers. PNG/GIF are re-encoded to JPEG.
+// with long-lived cache headers. PNG/GIF are re-encoded to JPEG.
+// The apiKey is sent both as X-Api-Key header and as ?apikey= query param
+// because Radarr's MediaCover endpoint requires the query param form.
 func (s *server) proxyImage(w http.ResponseWriter, imageURL, apiKey string) {
+	if apiKey != "" {
+		u, err := url.Parse(imageURL)
+		if err == nil {
+			q := u.Query()
+			q.Set("apikey", apiKey)
+			u.RawQuery = q.Encode()
+			imageURL = u.String()
+		}
+	}
 	req, err := http.NewRequest(http.MethodGet, imageURL, nil)
 	if err != nil {
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
@@ -1405,6 +1416,11 @@ func (s *server) proxyImage(w http.ResponseWriter, imageURL, apiKey string) {
 		return
 	}
 	contentType := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(contentType, "image/") {
+		log.Printf("[CalProxy] WARN: proxyImage: expected image, got %q from %s", contentType, imageURL)
+		http.NotFound(w, req)
+		return
+	}
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	if strings.HasPrefix(contentType, "image/jpeg") {
 		w.Header().Set("Content-Type", "image/jpeg")
@@ -1419,9 +1435,7 @@ func (s *server) proxyImage(w http.ResponseWriter, imageURL, apiKey string) {
 	}
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
-		// Unknown format — stream raw bytes with original content-type
-		w.Header().Set("Content-Type", contentType)
-		_, _ = w.Write(raw)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
