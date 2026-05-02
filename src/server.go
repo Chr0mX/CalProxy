@@ -1385,18 +1385,9 @@ func (s *server) radarrMoviePosterURLFromMetadataID(src Source, metadataID int) 
 
 // proxyImage fetches an image from an internal URL and streams it as JPEG
 // with long-lived cache headers. PNG/GIF are re-encoded to JPEG.
-// The apiKey is sent both as X-Api-Key header and as ?apikey= query param
-// because Radarr's MediaCover endpoint requires the query param form.
+// The apiKey is sent only as an X-Api-Key header and never appended to the
+// URL or forwarded to the client, so it is never exposed.
 func (s *server) proxyImage(w http.ResponseWriter, imageURL, apiKey string) {
-	if apiKey != "" {
-		u, err := url.Parse(imageURL)
-		if err == nil {
-			q := u.Query()
-			q.Set("apikey", apiKey)
-			u.RawQuery = q.Encode()
-			imageURL = u.String()
-		}
-	}
 	req, err := http.NewRequest(http.MethodGet, imageURL, nil)
 	if err != nil {
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
@@ -1418,7 +1409,7 @@ func (s *server) proxyImage(w http.ResponseWriter, imageURL, apiKey string) {
 	contentType := resp.Header.Get("Content-Type")
 	// Reject HTML — this is a login redirect, not an image.
 	if strings.Contains(contentType, "text/html") {
-		log.Printf("[CalProxy] WARN: proxyImage: got HTML from %s — likely an auth redirect", imageURL)
+		log.Printf("[CalProxy] WARN: proxyImage: got HTML response — likely an auth redirect")
 		http.NotFound(w, req)
 		return
 	}
