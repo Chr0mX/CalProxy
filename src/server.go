@@ -1244,6 +1244,8 @@ func resolveRadarrPosterURL(images []radarrImage, baseURL string) string {
 		}
 		u.RawQuery = ""
 		u.Fragment = ""
+		// Use the 500px MediaCover thumbnail Radarr serves in its UI.
+		u.Path = strings.Replace(u.Path, "poster.jpg", "poster-500.jpg", 1)
 		return u.String()
 	}
 	pick := func(img radarrImage) string {
