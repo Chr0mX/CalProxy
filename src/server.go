@@ -782,6 +782,7 @@ func (s *server) routes() http.Handler {
 
 	mux.HandleFunc("/img/sonarr/series/", s.handleImgSonarr)
 	mux.HandleFunc("/img/radarr/movie/", s.handleImgRadarr)
+	mux.HandleFunc("/img/radarr/meta/", s.handleImgRadarrMeta)
 
 	mux.HandleFunc("/api/public/homepage", s.handlePublicHomepageData)
 	mux.HandleFunc("/api/public/page/", s.handlePublicPageData)
@@ -1127,13 +1128,13 @@ func (s *server) resolveImageURL(src Source, uid string) string {
 			if idx := strings.Index(rest, "_"); idx >= 0 {
 				rest = rest[:idx]
 			}
-			movieID, err := strconv.Atoi(rest)
+			metadataID, err := strconv.Atoi(rest)
 			if err != nil {
-				log.Printf("[CalProxy] WARN: radarr UID %q: cannot parse movie ID from %q", uid, rest)
+				log.Printf("[CalProxy] WARN: radarr UID %q: cannot parse metadataId from %q", uid, rest)
 				return ""
 			}
-			log.Printf("[CalProxy] DEBUG: radarr UID %q → movie ID %d", uid, movieID)
-			return fmt.Sprintf("/img/radarr/movie/%d.jpg", movieID)
+			log.Printf("[CalProxy] DEBUG: radarr UID %q → metadataId %d", uid, metadataID)
+			return fmt.Sprintf("/img/radarr/meta/%d.jpg", metadataID)
 		}
 	}
 	return ""
@@ -1356,8 +1357,9 @@ func (s *server) radarrPrefetchPosters(src Source) error {
 		return fmt.Errorf("radarr /api/v3/movie returned HTTP %d", resp.StatusCode)
 	}
 	var movies []struct {
-		ID     int           `json:"id"`
-		Images []radarrImage `json:"images"`
+		ID              int           `json:"id"`
+		MovieMetadataID int           `json:"movieMetadataId"`
+		Images          []radarrImage `json:"images"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&movies); err != nil {
 		return err
@@ -1365,18 +1367,89 @@ func (s *server) radarrPrefetchPosters(src Source) error {
 	log.Printf("[CalProxy] DEBUG: radarr prefetch loaded %d movie(s)", len(movies))
 	cached := 0
 	for _, movie := range movies {
-		key := fmt.Sprintf("radarr_movie_poster_%d", movie.ID)
-		if _, ok := s.meta.get(key); ok {
-			continue // already populated by a prior individual lookup
+		posterURL := resolveRadarrPosterURL(movie.Images, baseURL)
+		if posterURL == "" {
+			continue
 		}
-		if u := resolveRadarrPosterURL(movie.Images, baseURL); u != "" {
-			s.meta.set(key, u)
+		// cache by real movie.id
+		idKey := fmt.Sprintf("radarr_movie_poster_%d", movie.ID)
+		if _, ok := s.meta.get(idKey); !ok {
+			s.meta.set(idKey, posterURL)
 			cached++
+		}
+		// cache by movieMetadataId so UID-based lookups work correctly
+		if movie.MovieMetadataID > 0 {
+			metaKey := fmt.Sprintf("radarr_meta_poster_%d", movie.MovieMetadataID)
+			if _, ok := s.meta.get(metaKey); !ok {
+				s.meta.set(metaKey, posterURL)
+			}
 		}
 	}
 	log.Printf("[CalProxy] DEBUG: radarr prefetch cached posters for %d/%d movie(s)", cached, len(movies))
 	s.meta.set(fmt.Sprintf("radarr_prefetch_done_%s", src.Token), "1")
 	return nil
+}
+
+// radarrMoviePosterURLFromMetadataID resolves a poster URL given a movieMetadataId
+// extracted from a Radarr calendar UID. metadataId != movie.id; this function
+// performs the lookup via /api/v3/movie to find the correct movie.id and its poster.
+func (s *server) radarrMoviePosterURLFromMetadataID(src Source, metadataID int) (string, error) {
+	key := fmt.Sprintf("radarr_meta_poster_%d", metadataID)
+	if v, ok := s.meta.get(key); ok {
+		return v, nil
+	}
+
+	// On first miss, bulk-load all movies (also populates radarr_meta_poster_* keys).
+	prefetchKey := fmt.Sprintf("radarr_prefetch_done_%s", src.Token)
+	if _, done := s.meta.get(prefetchKey); !done {
+		if err := s.radarrPrefetchPosters(src); err != nil {
+			log.Printf("[CalProxy] WARN: radarr bulk prefetch failed: %v", err)
+		} else if v, ok := s.meta.get(key); ok {
+			return v, nil
+		}
+	}
+
+	// Fallback: re-scan all movies to find one added after the prefetch.
+	baseURL, apiKey := extractAPICredentials(src.UpstreamURL)
+	if baseURL == "" || apiKey == "" {
+		return "", fmt.Errorf("cannot extract API credentials from source %s", src.Token)
+	}
+	apiURL := fmt.Sprintf("%s/api/v3/movie", baseURL)
+	log.Printf("[CalProxy] DEBUG: radarr metadataId %d fallback scan %s", metadataID, apiURL)
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("X-Api-Key", apiKey)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("radarr /api/v3/movie returned HTTP %d", resp.StatusCode)
+	}
+	var movies []struct {
+		ID              int           `json:"id"`
+		MovieMetadataID int           `json:"movieMetadataId"`
+		Images          []radarrImage `json:"images"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&movies); err != nil {
+		return "", err
+	}
+	for _, movie := range movies {
+		if movie.MovieMetadataID != metadataID {
+			continue
+		}
+		posterURL := resolveRadarrPosterURL(movie.Images, baseURL)
+		if posterURL == "" {
+			return "", fmt.Errorf("radarr metadataId %d (movie.id=%d): no valid poster URL", metadataID, movie.ID)
+		}
+		s.meta.set(key, posterURL)
+		log.Printf("[CalProxy] DEBUG: radarr metadataId %d → movie.id %d → poster %s", metadataID, movie.ID, posterURL)
+		return posterURL, nil
+	}
+	return "", fmt.Errorf("radarr metadataId %d not found among %d movies", metadataID, len(movies))
 }
 
 // proxyImage fetches an image from an internal URL and streams it as JPEG
@@ -1480,6 +1553,34 @@ func (s *server) handleImgRadarr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[CalProxy] DEBUG: radarr movie %d proxying image %s", movieID, posterURL)
+	s.proxyImage(w, posterURL, apiKey)
+}
+
+func (s *server) handleImgRadarrMeta(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/img/radarr/meta/")
+	rest = strings.TrimSuffix(rest, ".jpg")
+	metadataID, err := strconv.Atoi(rest)
+	if err != nil || metadataID <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	src, ok := s.findSourceByMode("radarr")
+	if !ok {
+		http.Error(w, "No Radarr source configured", http.StatusServiceUnavailable)
+		return
+	}
+	_, apiKey := extractAPICredentials(src.UpstreamURL)
+	posterURL, err := s.radarrMoviePosterURLFromMetadataID(src, metadataID)
+	if err != nil {
+		log.Printf("[CalProxy] WARN: radarr metadataId %d poster: %v", metadataID, err)
+		http.NotFound(w, r)
+		return
+	}
+	log.Printf("[CalProxy] DEBUG: radarr metadataId %d proxying image %s", metadataID, posterURL)
 	s.proxyImage(w, posterURL, apiKey)
 }
 
