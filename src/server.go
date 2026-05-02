@@ -1230,45 +1230,31 @@ type radarrImage struct {
 }
 
 // resolveRadarrPosterURL picks the best image URL from a Radarr images slice.
-// Prefers coverType=="poster"; falls back to the first valid image.
-// Relative URLs (starting with "/") are prefixed with baseURL.
-// URLs that do not parse as a valid absolute URL are skipped.
+// Finds the poster image from a Radarr images slice and returns the full
+// proxy-able URL using only the internal MediaCover path (images[].url).
+// The path is taken as-is from the API, query params stripped, then the
+// 500px variant is requested (poster.jpg → poster-500.jpg).
+// remoteUrl (TMDB/external) is never used — all images must be proxied
+// through Radarr's MediaCover by CalProxy.
 func resolveRadarrPosterURL(images []radarrImage, baseURL string) string {
-	resolve := func(raw string) string {
+	for _, img := range images {
+		if img.CoverType != "poster" || img.URL == "" {
+			continue
+		}
+		raw := img.URL
 		if strings.HasPrefix(raw, "/") {
 			raw = baseURL + raw
 		}
 		u, err := url.Parse(raw)
 		if err != nil || u.Host == "" {
-			return ""
+			continue
 		}
 		u.RawQuery = ""
 		u.Fragment = ""
-		// Use the 500px MediaCover thumbnail Radarr serves in its UI.
 		u.Path = strings.Replace(u.Path, "poster.jpg", "poster-500.jpg", 1)
 		return u.String()
 	}
-	pick := func(img radarrImage) string {
-		if img.URL != "" {
-			return resolve(img.URL)
-		}
-		return resolve(img.RemoteURL)
-	}
-	var first string
-	for _, img := range images {
-		if img.URL == "" && img.RemoteURL == "" {
-			continue
-		}
-		if img.CoverType == "poster" {
-			if u := pick(img); u != "" {
-				return u
-			}
-		}
-		if first == "" {
-			first = pick(img)
-		}
-	}
-	return first
+	return ""
 }
 
 // radarrPrefetchPosters bulk-loads all Radarr movie poster URLs via
