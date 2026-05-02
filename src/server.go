@@ -1251,7 +1251,6 @@ func resolveRadarrPosterURL(images []radarrImage, baseURL string) string {
 		}
 		u.RawQuery = ""
 		u.Fragment = ""
-		u.Path = strings.Replace(u.Path, "poster.jpg", "poster-500.jpg", 1)
 		return u.String()
 	}
 	return ""
