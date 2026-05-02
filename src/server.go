@@ -1385,9 +1385,18 @@ func (s *server) radarrMoviePosterURLFromMetadataID(src Source, metadataID int) 
 
 // proxyImage fetches an image from an internal URL and streams it as JPEG
 // with long-lived cache headers. PNG/GIF are re-encoded to JPEG.
-// The apiKey is sent only as an X-Api-Key header and never appended to the
-// URL or forwarded to the client, so it is never exposed.
+// apiKey is appended as ?apikey= (required by Radarr/Sonarr MediaCover) but
+// is never forwarded to the client in any response header or body.
 func (s *server) proxyImage(w http.ResponseWriter, imageURL, apiKey string) {
+	if apiKey != "" {
+		u, err := url.Parse(imageURL)
+		if err == nil {
+			q := u.Query()
+			q.Set("apikey", apiKey)
+			u.RawQuery = q.Encode()
+			imageURL = u.String()
+		}
+	}
 	req, err := http.NewRequest(http.MethodGet, imageURL, nil)
 	if err != nil {
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
