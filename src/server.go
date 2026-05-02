@@ -781,7 +781,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/logout", s.handleLogout)
 
 	mux.HandleFunc("/img/sonarr/series/", s.handleImgSonarr)
-	mux.HandleFunc("/img/radarr/meta/", s.handleImgRadarrMeta)
+	mux.HandleFunc("/img/radarr/poster/", s.handleImgRadarrMeta)
 
 	mux.HandleFunc("/api/public/homepage", s.handlePublicHomepageData)
 	mux.HandleFunc("/api/public/page/", s.handlePublicPageData)
@@ -1133,7 +1133,7 @@ func (s *server) resolveImageURL(src Source, uid string) string {
 				return ""
 			}
 			log.Printf("[CalProxy] DEBUG: radarr UID %q → metadataId %d", uid, metadataID)
-			return fmt.Sprintf("/img/radarr/meta/%d.jpg", metadataID)
+			return fmt.Sprintf("/img/radarr/poster/%d.jpg", metadataID)
 		}
 	}
 	return ""
@@ -1462,7 +1462,7 @@ func (s *server) handleImgRadarrMeta(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	rest := strings.TrimPrefix(r.URL.Path, "/img/radarr/meta/")
+	rest := strings.TrimPrefix(r.URL.Path, "/img/radarr/poster/")
 	rest = strings.TrimSuffix(rest, ".jpg")
 	metadataID, err := strconv.Atoi(rest)
 	if err != nil || metadataID <= 0 {
