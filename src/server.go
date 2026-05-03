@@ -1251,6 +1251,9 @@ func resolveRadarrPosterURL(images []radarrImage, baseURL string) string {
 		}
 		u.RawQuery = ""
 		u.Fragment = ""
+		// /MediaCover/ is session-auth only; rewrite to /api/v3/mediacover/
+		// so the API key query param is honoured by Radarr's auth middleware.
+		u.Path = strings.Replace(u.Path, "/MediaCover/", "/api/v3/mediacover/", 1)
 		return u.String()
 	}
 	return ""
