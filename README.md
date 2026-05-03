@@ -1,189 +1,201 @@
 # CalProxy
 
-A self-hostable reverse proxy that exposes safe, shareable `webcal://` URLs for
-Sonarr and Radarr calendar feeds — without leaking upstream URLs, API keys, or
-internal hostnames to calendar clients.
+A self-hostable reverse proxy that securely hides and proxies API keys for media automation tools — specifically **Radarr** and **Sonarr**.
+
+CalProxy acts as a privacy and security layer between public-facing calendar clients and your backend media services. It exposes safe, shareable `webcal://` URLs without ever leaking upstream API keys, internal hostnames, or credentials.
 
 ```
-GET /cal/<32-char-hex-token>        ← public, safe to share
-        ↓  fetched + cached server-side
-http://sonarr:8989/feed/...?apikey=SECRET   ← never sent to clients
+GET /cal/<token>                                     ← public, safe to share
+        ↓  fetched and cached server-side
+http://sonarr:8989/feed/v3/calendar/Sonarr.ics?apikey=SECRET   ← never exposed to clients
 ```
 
 ---
 
-## Quick start
+## Important Notice
 
-### Option A — pre-built image (recommended)
+> **This project is 100% AI-assisted generated code.**
+>
+> No official support, maintenance guarantees, or assistance of any kind will be provided.
+> **Use this project entirely at your own risk.**
+
+---
+
+## Purpose
+
+The core goal of CalProxy is to prevent direct exposure of sensitive API keys in client-facing environments. By routing all requests through a secure proxy layer, it:
+
+- Removes API keys from any URL that could be shared, logged, or cached by calendar clients
+- Centralizes and controls all API access logic in one place
+- Reduces the risk of accidental credential leaks or unauthorized API usage
+- Provides a clean abstraction between public access and your private media infrastructure
+
+---
+
+## Problems This Project Solves
+
+- API keys exposed in iCal feed URLs shared with calendar applications
+- No secure proxy layer available for Sonarr/Radarr calendar feeds out of the box
+- Difficulty managing multiple service integrations securely in a single place
+- Risk of unauthorized API usage when feed URLs are shared or intercepted
+
+---
+
+## Solutions Implemented
+
+- A proxy layer that intercepts and forwards calendar requests without exposing upstream credentials
+- Abstraction of direct API calls to Radarr and Sonarr behind randomized, opaque tokens
+- Centralized configuration handling for all sensitive credentials via environment variables
+- Structured request handling that rewrites or strips identifying information (e.g., `PRODID` headers) before returning responses to clients
+- In-memory caching with configurable TTL to reduce upstream load and improve response times
+
+---
+
+## Features
+
+- **API request forwarding** — proxies iCal calendar feeds from Sonarr and Radarr to clients via token URLs
+- **Secure credential handling** — upstream URLs and API keys are stored server-side and never returned in unauthenticated responses
+- **Token-based routing** — each source is assigned a 128-bit cryptographically random hex token; tokens can be revoked and regenerated
+- **Merge groups** — combine multiple calendar sources into a single feed URL
+- **Image proxying** — proxies series and movie poster images without exposing upstream API keys
+- **Admin dashboard** — browser-based UI for managing sources, merge groups, and public pages
+- **Public pages** — slug-based calendar pages with theme support for sharing with others
+- **Session authentication** — bcrypt-hashed admin password with 8-hour session TTL
+- **ETag-based caching** — conditional upstream fetches with configurable TTL (default 300 seconds)
+- **Docker-native** — multi-stage Docker build with PUID/PGID support for correct file permissions
+- **Minimal dependencies** — written in Go with a single external dependency (`golang.org/x/crypto`)
+
+---
+
+## Usage Guide
+
+### 1. Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/) installed
+- A running Sonarr and/or Radarr instance accessible from the host running CalProxy
+
+### 2. Get the Compose File
 
 ```bash
-# 1. Download the compose file
 curl -O https://raw.githubusercontent.com/chr0mx/calproxy/main/docker-compose.yml
+```
 
-# 2. Set your admin password
-#    Linux/macOS:
-sed -i 's/ADMIN_PASSWORD: changeme/ADMIN_PASSWORD: yourpassword/' docker-compose.yml
-#    Or just open the file and edit ADMIN_PASSWORD manually.
+### 3. Configure Environment Variables
 
-# 3. Start
+Open `docker-compose.yml` and set the following under `environment`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ADMIN_PASSWORD` | `changeme` | Password for the admin interface — **change this** |
+| `PORT` | `3000` | HTTP listen port inside the container |
+| `DATA_FILE` | `./data/sources.json` | Path to the JSON persistence file |
+| `CACHE_TTL` | `300` | Upstream feed cache duration in seconds |
+| `PUBLIC_HOMEPAGE_ENABLED` | `true` | Whether to serve a public homepage at `/` |
+| `TRUSTED_PROXIES` | _(empty)_ | Comma-separated IPs/CIDRs allowed to supply `X-Real-IP` / `X-Forwarded-For` |
+
+> API keys are **never** placed in environment variables. They are stored server-side inside the upstream URL of each source you configure via the admin UI.
+
+### 4. Start the Service
+
+```bash
 docker compose up -d
 ```
 
-The image is pulled automatically from `ghcr.io/chr0mx/calproxy:latest`.  
-To pin to a specific release use a tag instead: `ghcr.io/chr0mx/calproxy:1.0.0`.
+The service will be available at `http://your-host:3000`.
 
-### Option B — build from source
+### 5. Find Your Calendar Feed URLs
+
+**Sonarr:**
+1. Open Sonarr → **Settings → General**
+2. Scroll to **Calendar Feed**
+3. Copy the iCal feed URL (it contains `?apikey=…`)
+
+**Radarr:**
+1. Open Radarr → **Settings → General**
+2. Scroll to **Calendar Feed**
+3. Copy the iCal feed URL (it contains `?apikey=…`)
+
+### 6. Add Sources in CalProxy
+
+1. Navigate to `http://your-host:3000` and click **Login**
+2. Enter the admin password configured in step 3
+3. In the admin dashboard, click **Add Source**
+4. Paste the upstream iCal URL (including the API key) into the **Upstream URL** field
+5. Give the source a name and save
+
+CalProxy generates a token URL in the format:
+
+```
+/cal/<32-char-hex-token>
+```
+
+This is the URL you share with calendar clients. The upstream URL and API key remain on the server.
+
+### 7. Connect with Calendar Clients
+
+Use the token URL with the `webcal://` scheme in any calendar application:
+
+```
+webcal://your-host:3000/cal/<token>
+```
+
+If you are running CalProxy behind a reverse proxy with TLS, use `https://` or `webcal://` with your public domain.
+
+### 8. Optional — Reverse Proxy with NGINX Proxy Manager
+
+1. Create a new **Proxy Host**
+2. Set the domain to your public hostname (e.g., `calproxy.example.com`)
+3. Forward to the container hostname and port (e.g., `calproxy:3000`)
+4. Enable **Force SSL** and request a Let's Encrypt certificate
+
+Set `TRUSTED_PROXIES` in your environment so CalProxy correctly identifies real client IPs:
+
+```yaml
+environment:
+  TRUSTED_PROXIES: "172.16.0.0/12"
+```
+
+### 9. Build from Source (Optional)
 
 ```bash
 git clone https://github.com/chr0mx/calproxy
 cd calproxy
-# Replace the image: line with build: . in docker-compose.yml, then:
 docker compose up -d --build
 ```
 
-Open `http://your-host:3456` to view the public homepage. Click **Login** to access admin.
-
----
-
-## Finding the calendar URL
-
-### Sonarr
-1. Open Sonarr → **Settings → General**
-2. Scroll to **Calendar Feed**
-3. Copy the **iCal Feed** URL (includes `?apikey=…`)
-
-### Radarr
-1. Open Radarr → **Settings → General**
-2. Scroll to **Calendar Feed**
-3. Copy the **iCal Feed** URL (includes `?apikey=…`)
-
-Paste the copied URL into CalProxy as the **Upstream URL** when adding a source.
-CalProxy will proxy it via a token URL that is safe to share.
-
----
-
-## Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `3000` | HTTP listen port |
-| `ADMIN_PASSWORD` | `changeme` | Password for HTTP Basic Auth (any username accepted) |
-| `DATA_FILE` | `./data/sources.json` | Path to the JSON persistence file |
-| `CACHE_TTL` | `300` | How long to cache upstream feeds, in seconds |
-| `PUBLIC_HOMEPAGE_ENABLED` | `true` | If `true`, `/` serves public homepage without auth |
-| `TRUSTED_PROXIES` | _(empty)_ | Comma-separated IP/CIDR list that may supply `X-Real-IP` / `X-Forwarded-For` |
-
----
-
-## Nginx Proxy Manager setup
-
-1. In NPM, create a new **Proxy Host**
-2. **Domain Names**: `calproxy.example.com`
-3. **Forward Hostname/IP**: `calproxy` (container name on the `proxy` network)
-4. **Forward Port**: `3000`
-5. Enable **Block Common Exploits** and **Websockets Support**
-6. Under **SSL**, request a Let's Encrypt certificate and enable **Force SSL**
-7. Save — CalProxy is now reachable at `https://calproxy.example.com`
-
-Calendar clients should use `webcal://calproxy.example.com/cal/<token>`.
-
----
-
-## Admin API reference
-
-All admin endpoints require a logged-in session cookie.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/sources` | List all sources — `upstreamUrl` is **never** included |
-| `GET` | `/api/sources/:token` | Get one source including `upstreamUrl` (for editing) |
-| `POST` | `/api/sources` | Create a source; token is auto-generated |
-| `PUT` | `/api/sources/:token` | Update `name`, `upstreamUrl`, `description`, or `enabled` |
-| `DELETE` | `/api/sources/:token` | Delete source and evict its cache entry |
-| `POST` | `/api/sources/:token/refresh` | Purge cached feed for one source |
-| `GET` | `/api/stats` | Returns `{ sources, cached, cacheTtl }` |
-| `GET` | `/api/public/homepage` | Public homepage data with aggregated upcoming events |
-
-### Source schema
-
-```json
-{
-  "token":       "a1b2c3d4e5f6...",
-  "name":        "Sonarr TV",
-  "upstreamUrl": "http://sonarr:8989/feed/v3/calendar/Sonarr.ics?apikey=SECRET",
-  "description": "TV show air dates",
-  "enabled":     true,
-  "createdAt":   "2026-04-29T00:00:00.000Z"
-}
-```
-
-### Example: create a source
+To run without Docker:
 
 ```bash
-curl -u admin:changeme \
-  -X POST http://localhost:3456/api/sources \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "Sonarr TV",
-    "upstreamUrl": "http://sonarr:8989/feed/v3/calendar/Sonarr.ics?apikey=SECRET",
-    "description": "TV show air dates"
-  }'
+DATA_FILE=./data/sources.json ADMIN_PASSWORD=yourpassword go run ./src/
 ```
 
 ---
 
-## Public endpoint
+## Public Calendar Token Behavior
 
-```
-GET /cal/:token
-```
-
-- Returns `Content-Type: text/calendar; charset=utf-8`
-- Sets `Cache-Control: public, max-age=<CACHE_TTL>`
-- Rewrites `PRODID:` to hide upstream app identity
-- Returns `404` for unknown or disabled tokens
-- Returns `503` if the upstream is unreachable and no stale cache exists
-- Serves stale cache on upstream failure if a previous successful fetch exists
+| Condition | Response |
+|-----------|----------|
+| Valid, enabled token | `200 OK` — `text/calendar` feed |
+| Unknown or disabled token | `404 Not Found` |
+| Upstream unreachable, cache available | `200 OK` — stale cached feed served |
+| Upstream unreachable, no cache | `503 Service Unavailable` |
 
 ---
 
-## Security
+## Security Notes
 
-- `upstreamUrl` never appears in unauthenticated responses
-- `PRODID` is always rewritten in the iCal output
-- Tokens are 128-bit cryptographically random hex strings
-- HTTP Basic Auth protects all admin routes and the admin UI
-- Upstream fetch timeout: 10 seconds
+- Upstream URLs (containing API keys) are **never** returned in unauthenticated API responses
+- All `PRODID` fields in iCal output are rewritten to remove upstream app identity
+- Tokens are generated using `crypto/rand` — 128 bits of entropy
+- Admin routes are protected by session authentication with bcrypt-hashed passwords
+- Upstream HTTP requests have a 10-second timeout to prevent resource exhaustion
 
 ---
 
-## Development
+## Final Notes
 
-```bash
-# Run locally (no Docker)
-DATA_FILE=./data/sources.json ADMIN_PASSWORD=secret go run ./src/
+This is a personal and experimental project. No warranties are made regarding correctness, security, or fitness for any purpose. No support will be provided.
 
-# Build binary
-go build -o calproxy ./src/
+Do not commit or expose your `sources.json` data file, as it contains upstream URLs with API keys. Treat the data directory as sensitive.
 
-# Build Docker image
-docker build -t calproxy .
-```
-
-
-## Reverse proxy real client IP
-
-Set `TRUSTED_PROXIES` to the IPs/CIDRs of your proxy hops (for example `127.0.0.1,172.16.0.0/12`). CalProxy only reads `X-Real-IP` and `X-Forwarded-For` when the direct peer (`RemoteAddr`) is in that trusted list; otherwise it falls back to socket `RemoteAddr`.
-
-Example:
-
-```yaml
-environment:
-  TRUSTED_PROXIES: "127.0.0.1,172.16.0.0/12"
-```
-
-## UI flow
-
-- `/` → public homepage with calendar widget and Login button.
-- `/login` → authenticate admin user.
-- `/admin` → full admin dashboard (requires auth).
+Keep `ADMIN_PASSWORD` set to a strong value. The default `changeme` is intentionally insecure and must be replaced before any production or internet-facing use.
