@@ -15,25 +15,43 @@ services:
       PORT: 3000
 
       # Admin password for the web UI. The app hashes this with bcrypt at startup;
-      # the plaintext value is never stored on disk.
+      # the plaintext value is never stored on disk. Change this before any
+      # internet-facing deployment.
       ADMIN_PASSWORD: changeme
 
-      # Where sources are persisted inside the container.
-      # The directory must be inside the volume mount below.
+      # Where sources (including upstream URLs and API keys) are persisted inside
+      # the container. The directory must be inside the volume mount below.
       DATA_FILE: /data/sources.json
 
-      # How long upstream feeds are cached in seconds.
-      # 300 = 5 minutes. Increase to reduce upstream load.
+      # How long upstream calendar feeds are cached in seconds.
+      # 300 = 5 minutes. Increase to reduce load on Sonarr/Radarr.
       CACHE_TTL: 300
+
+      # Set to "false", "0", or "no" to disable the public homepage at /.
+      # When disabled, unauthenticated visitors receive 404 instead of the
+      # calendar widget. Useful when CalProxy is not meant to be publicly browsed.
+      PUBLIC_HOMEPAGE_ENABLED: "true"
+
+      # Comma-separated list of IP addresses or CIDR ranges whose
+      # X-Real-IP / X-Forwarded-For headers CalProxy will trust for real client
+      # IP detection. Leave empty if CalProxy is directly internet-facing.
+      # Example (Nginx Proxy Manager on the default Docker bridge):
+      #   TRUSTED_PROXIES: "172.16.0.0/12"
+      # TRUSTED_PROXIES: ""
 
       # ── Volume permission fix (bind mounts only) ───────────────────────────
       # If you use a host-path bind mount (e.g. ./data:/data) and the container
       # cannot write to it, set PUID/PGID to match the UID/GID that owns the
-      # host directory:
-      #   PUID: "1000"
-      #   PGID: "1000"
-      # Named volumes (default below) do not need this — the entrypoint handles
-      # ownership automatically.
+      # host directory (run: id -u && id -g on the host to find the values).
+      # Named volumes (default below) do not need this.
+      # PUID: "1000"
+      # PGID: "1000"
+
+      # ── Build metadata overrides (advanced, optional) ─────────────────────
+      # Override the version/branch strings shown in the admin UI footer.
+      # Useful when running a custom build without recompiling.
+      # APP_VERSION: "1.0.0"
+      # APP_BRANCH: "main"
 
     # ── Volumes ───────────────────────────────────────────────────────────────
     # Named volume (recommended): Docker manages ownership automatically.
