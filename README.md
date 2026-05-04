@@ -4,9 +4,10 @@ CalProxy is a lightweight security proxy for media calendar integrations.
 It sits between public-facing clients and backend media automation services (Sonarr and Radarr) so sensitive credentials are never exposed directly.
 
 ```
-GET /cal/<token>                                     ← public, safe to share
-        ↓  fetched and cached server-side
-http://sonarr:8989/feed/v3/calendar/Sonarr.ics?apikey=SECRET   ← never sent to clients
+welcal://calproxy:3000/cal/<token>                                ← public, safe to share
+ ↓  fetched from and cached server-side
+welcal://sonarr:8989/feed/v3/calendar/Sonarr.ics?apikey=SECRET   ← never sent to clients
+welcal://sonarr:7979/feed/v3/calendar/Radarr.ics?apikey=SECRET   ← never sent to clients
 ```
 
 ---
@@ -16,8 +17,8 @@ http://sonarr:8989/feed/v3/calendar/Sonarr.ics?apikey=SECRET   ← never sent to
 CalProxy is designed to securely hide and proxy API-linked calendar access for media automation tools.
 
 - Protects and abstracts API usage for **Radarr** and **Sonarr**.
-- Acts as a **privacy and security layer** between public consumers and backend services.
-- Clients receive safe, shareable proxy endpoints instead of direct credential-bearing upstream URLs.
+- Acts as a **privacy and security layer** between public users and backend services.
+- Users receive safe, shareable endpoints instead of direct API-bearing upstream URLs.
 
 ---
 
@@ -69,7 +70,7 @@ To solve these problems, CalProxy implements:
 
 ---
 
-## 6) Features / Function Breakdown
+## 6) Features
 
 ### A) API/feed request forwarding
 - Forwards public token-based requests to Sonarr/Radarr calendar feeds.
@@ -84,17 +85,21 @@ To solve these problems, CalProxy implements:
 - Merge groups combine multiple sources into a single feed URL.
 - Public pages allow slug-based calendar sharing with theme support.
 
-### D) Configuration-driven setup
-- All runtime behavior controlled via environment variables.
-- Security-sensitive settings (upstream URLs, API keys) stored in a server-side JSON data file.
-- PUID/PGID support for correct file permissions on bind-mounted volumes.
-
-### E) Operational visibility
+### D) Operational visibility
 - `/health` endpoint for container health checks and uptime monitoring.
 - Admin stats endpoint (`/api/stats`) reports source count, cache usage, and TTL.
 - Stale cache fallback — serves last known good feed if upstream is temporarily unreachable.
 - Image proxying for Sonarr series posters and Radarr movie posters (no key exposure).
-
+- 
+### E) Enhanced thumbnail support (public view)
+- Public calendar view includes **poster thumbnails** for both Sonarr (series) and Radarr (movies).
+- Adds an **additional thumbnail slot per entry** to improve visual clarity when browsing schedule.
+- Thumbnails are retrieved via the internal image proxy to prevent API key exposure.
+- Supports:
+  - Sonarr → series poster  
+  - Radarr → movie poster 
+- Optimized for caching (e.g. via Cloudflare) to reduce repeated upstream image requests.
+- Graceful fallback if images are unavailable (no broken UI elements).
 ---
 
 ## 7) Usage Guide
@@ -142,19 +147,9 @@ Open `docker-compose.yml` and review the `environment` block. At minimum, set `A
 | `PUID` / `PGID` | _(unset)_ | Host UID/GID for bind-mount permission fixing (not needed for named volumes) |
 | `APP_VERSION` / `APP_BRANCH` | _(build-time)_ | Optional override of version strings shown in the admin UI footer |
 
-> API keys are **never** placed in environment variables. They are stored inside the upstream URL of each source, which lives in the server-side data file only.
-
 ---
 
-### Step 3: Store API keys securely
-
-- Do **not** place API keys in frontend code, client apps, or public documentation.
-- Upstream Sonarr/Radarr feed URLs (which contain keys) are entered only through the authenticated admin UI.
-- Treat the `DATA_FILE` path and its directory as sensitive — do not commit or expose it.
-
----
-
-### Step 4: Start and access the admin interface
+### Step 3: Start and access the admin interface
 
 After starting the service, open `http://your-host:3456` in a browser.
 
@@ -162,7 +157,7 @@ Click **Login** and enter the `ADMIN_PASSWORD` value set in your compose file.
 
 ---
 
-### Step 5: Connect Sonarr and Radarr
+### Step 4: Connect Sonarr and Radarr
 
 **Find the iCal feed URL in Sonarr:**
 1. Open Sonarr → **Settings → General**
@@ -182,7 +177,7 @@ In the CalProxy admin dashboard, click **Add Source**, paste the upstream URL, g
 
 ---
 
-### Step 6: Share only proxy URLs
+### Step 5: Share only proxy URLs
 
 Use only the generated proxy endpoints with calendar clients:
 
@@ -201,13 +196,13 @@ environment:
 
 ---
 
-### Example high-level flow
+### Example flow
 
-1. Admin adds a Sonarr/Radarr upstream feed URL in CalProxy admin.
-2. CalProxy stores the upstream URL privately in the server-side data file.
+1. Add Sonarr/Radarr upstream feed URL in CalProxy admin.
+2. CalProxy stores the upstream URL privately on server.
 3. CalProxy returns a public token URL safe to share with calendar clients.
-4. Client subscribes to the CalProxy token URL.
-5. CalProxy fetches and caches the upstream feed, rewrites identifying fields, and returns a clean calendar response.
+4. User subscribes to the CalProxy URL.
+5. CalProxy fetches the upstream feed, rewrites identifying fields, and returns a clean calendar response.
 
 ---
 
@@ -224,8 +219,5 @@ environment:
 
 ## 8) Final Notes
 
-- Keep all credentials server-side only.
-- Do not expose real API keys in examples, screenshots, or configuration snippets shared publicly.
-- Do not commit the `sources.json` data file — it contains upstream URLs with API keys.
 - This repository is a personal/experimental project intended for learning and reference only.
 - No support or maintenance commitment of any kind is provided.
