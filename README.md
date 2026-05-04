@@ -22,7 +22,7 @@ Admin View
 ![Admin View](/images/AdminView.png)
 
 ### 🌐 Public View
-Public Hover
+Public Description
 
 ![Hover Description](/images/PublicHoverDescription.png)
 
