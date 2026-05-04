@@ -4,7 +4,7 @@ CalProxy is a lightweight security proxy for media calendar integrations.
 It sits between public-facing clients and backend media automation services (Sonarr and Radarr) so sensitive credentials are never exposed directly.
 
 ```
-welcal://calproxy:3000/cal/<token>                               ← public, safe to share
+welcal://your-host:3456/cal/<token>                               ← public, safe to share
  ↓  fetched from and cached (cloudfare)
 welcal://sonarr:8989/feed/v3/calendar/Sonarr.ics?apikey=SECRET   ← secret, not safe to share
 welcal://radarr:7979/feed/v3/calendar/Radarr.ics?apikey=SECRET   ← secret, not safe to share
@@ -34,9 +34,9 @@ This is a personal/experimental project shared for reference and learning.
 
 ---
 
-## 3) Purpose / Why This Project Exists
+## 3) Purpose
 
-This project exists to reduce credential exposure and improve control over media-service integrations.
+This project is designed to minimize credential exposure while providing greater control over how calendars are shared.
 
 Primary goals:
 
@@ -51,10 +51,10 @@ Primary goals:
 
 CalProxy addresses the following common issues:
 
-- API keys exposed in iCal feed URLs shared with calendar applications or clients.
-- No dedicated secure proxy layer available for Sonarr/Radarr calendar feeds out of the box.
-- Difficulty managing multiple service integrations securely in a single place.
-- Risk of unauthorized API/feed usage through leaked or intercepted URLs.
+- Exposure of API keys in Sonarr and Radarr iCal feed URLs.
+- Lack of a dedicated secure proxy layer for Sonarr/Radarr calendar feeds.
+- Difficulty managing multiple Sonarr and Radarr instances and their feeds.
+- Risk of unauthorized access due to leaked or intercepted feed URLs.
 
 ---
 
@@ -63,8 +63,8 @@ CalProxy addresses the following common issues:
 To solve these problems, CalProxy implements:
 
 - A secure proxy layer that performs upstream requests server-side, hiding all credentials.
-- Abstraction of direct client calls to Sonarr/Radarr behind randomized, opaque tokens.
-- Centralized sensitive configuration handling — credentials remain on the server only.
+- Abstraction of direct client calls to Sonarr/Radarr behind randomized, tokens.
+- Centralized sensitive configuration handling - credentials remain on the server only.
 - Structured request flow that rewrites or strips identifying information (e.g. `PRODID` headers) before returning responses.
 - In-memory caching with ETag support to reduce upstream load and improve response times.
 
@@ -73,7 +73,7 @@ To solve these problems, CalProxy implements:
 ## 6) Features
 
 ### A) API/feed request forwarding
-- Forwards public token-based requests to Sonarr/Radarr calendar feeds.
+- Forwards requests from Sonarr/Radarr calendar feeds.
 - Keeps upstream URLs and API keys private — never included in public responses.
 
 ### B) Secure authentication and header handling
@@ -88,10 +88,9 @@ To solve these problems, CalProxy implements:
 ### D) Operational visibility
 - `/health` endpoint for container health checks and uptime monitoring.
 - Admin stats endpoint (`/api/stats`) reports source count, cache usage, and TTL.
-- Stale cache fallback — serves last known good feed if upstream is temporarily unreachable.
-- Image proxying for Sonarr series posters and Radarr movie posters (no key exposure).
+- Image proxying for Sonarr series posters and Radarr movie posters (no API key exposure).
 - 
-### E) Enhanced thumbnail support (public view)
+### E) Thumbnail support (public view)
 - Public calendar view includes **poster thumbnails** for both Sonarr (series) and Radarr (movies).
 - Adds an **additional thumbnail slot per entry** to improve visual clarity when browsing schedule.
 - Thumbnails are retrieved via the internal image proxy to prevent API key exposure.
@@ -99,7 +98,6 @@ To solve these problems, CalProxy implements:
   - Sonarr → series poster  
   - Radarr → movie poster 
 - Optimized for caching (e.g. via Cloudflare) to reduce repeated upstream image requests.
-- Graceful fallback if images are unavailable (no broken UI elements).
 ---
 
 ## 7) Usage Guide
@@ -151,7 +149,7 @@ Open `docker-compose.yml` and review the `environment` block. At minimum, set `A
 
 ### Step 3: Start and access the admin interface
 
-After starting the service, open `http://your-host:3456` in a browser.
+After starting the service, open `http://your-host:3456` in a browser (docker-compose).
 
 Click **Login** and enter the `ADMIN_PASSWORD` value set in your compose file.
 
@@ -177,17 +175,17 @@ In the CalProxy admin dashboard, click **Add Source**, paste the upstream URL, g
 
 ---
 
-### Step 5: Share only proxy URLs
+### Step 5: Share proxied URLs
 
-Use only the generated proxy endpoints with calendar clients:
+Share generated proxy endpoints with calendar clients:
 
 ```
-webcal://your-domain/cal/<token>
+webcal://your-host:3456/cal/<token>
 ```
 
 Never share raw Sonarr/Radarr URLs that contain API keys.
 
-If running CalProxy behind a reverse proxy with TLS (recommended), use your public domain with the `webcal://` scheme. For Nginx Proxy Manager, set `TRUSTED_PROXIES` so real client IPs are correctly identified:
+If running CalProxy behind a reverse proxy with TLS (recommended) For Nginx Proxy Manager, set `TRUSTED_PROXIES` so real client IPs are correctly identified:
 
 ```yaml
 environment:
@@ -200,7 +198,7 @@ environment:
 
 1. Add Sonarr/Radarr upstream feed URL in CalProxy admin.
 2. CalProxy stores the upstream URL privately on server.
-3. CalProxy returns a public token URL safe to share with calendar clients.
+3. CalProxy returns a public token URL safe to share.
 4. User subscribes to the CalProxy URL.
 5. CalProxy fetches the upstream feed, rewrites identifying fields, and returns a clean calendar response.
 
