@@ -4,10 +4,14 @@ CalProxy is a lightweight security proxy for media calendar integrations.
 It sits between public-facing clients and backend media automation services (Sonarr and Radarr) so sensitive credentials are never exposed directly.
 
 ```
-welcal://your-host:3456/cal/<token>                               ← public, safe to share
- ↓  fetched from and cached (cloudfare)
+
 welcal://sonarr:8989/feed/v3/calendar/Sonarr.ics?apikey=SECRET   ← secret, not safe to share
 welcal://radarr:7979/feed/v3/calendar/Radarr.ics?apikey=SECRET   ← secret, not safe to share
+ ↓  fetched from and cached (cloudfare) to 
+welcal://your-host:3456/cal/<token>                              ← public, safe to share
+
+
+
 ```
 
 ---
