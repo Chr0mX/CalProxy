@@ -12,20 +12,20 @@ services:
     # ── Environment variables ─────────────────────────────────────────────────
     environment:
       # Port the app listens on inside the container (matches the right side of ports above).
-      PORT: 3000
+      PORT: "3000"
 
       # Admin password for the web UI. The app hashes this with bcrypt at startup;
       # the plaintext value is never stored on disk. Change this before any
       # internet-facing deployment.
-      ADMIN_PASSWORD: changeme
+      ADMIN_PASSWORD: "changeme"
 
       # Where sources (including upstream URLs and API keys) are persisted inside
       # the container. The directory must be inside the volume mount below.
-      DATA_FILE: /data/sources.json
+      DATA_FILE: "/data/sources.json"
 
       # How long upstream calendar feeds are cached in seconds.
       # 300 = 5 minutes. Increase to reduce load on Sonarr/Radarr.
-      CACHE_TTL: 300
+      CACHE_TTL: "300"
 
       # Set to "false", "0", or "no" to disable the public homepage at /.
       # When disabled, unauthenticated visitors receive 404 instead of the
@@ -37,7 +37,7 @@ services:
       # IP detection. Leave empty if CalProxy is directly internet-facing.
       # Example (Nginx Proxy Manager on the default Docker bridge):
       #   TRUSTED_PROXIES: "172.16.0.0/12"
-      # TRUSTED_PROXIES: ""
+      TRUSTED_PROXIES: ""
 
       # ── Volume permission fix (bind mounts only) ───────────────────────────
       # If you use a host-path bind mount (e.g. ./data:/data) and the container
@@ -67,21 +67,7 @@ services:
     networks:
       - proxy
 
-    # ── Homepage dashboard labels (optional) ─────────────────────────────────
-    labels:
-      homepage.group: "Media"
-      homepage.name: "CalProxy"
-      homepage.icon: "calendar"
-      homepage.href: "http://calproxy:3000"
-      homepage.description: "Webcal proxy for Sonarr & Radarr"
-
-      # ── Traefik labels (optional — remove if using Nginx Proxy Manager) ─────
-      # traefik.enable: "true"
-      # traefik.http.routers.calproxy.rule: "Host(`calproxy.example.com`)"
-      # traefik.http.routers.calproxy.entrypoints: "websecure"
-      # traefik.http.routers.calproxy.tls.certresolver: "letsencrypt"
-      # traefik.http.services.calproxy.loadbalancer.server.port: "3000"
-
+    # ── Healthcheck ───────────────────────────────────────────────────────────
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
       interval: 30s
