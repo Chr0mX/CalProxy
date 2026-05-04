@@ -16,11 +16,15 @@ welcal://your-host:3456/cal/<token>                              ← public, saf
 ## 📸 Screenshots
 
 ### 🔐 Admin
+Admin Login
 ![Admin Login](/images/AdminLogin.png)
+Admin View
 ![Admin View](/images/AdminView.png)
 
 ### 🌐 Public View
+Public Hover
 ![Hover Description](/images/PublicHoverDescription.png)
+Radarr and Sonarr feeds
 ![Radarr and Sonarr](/images/PublicRadarrandSonarr.png)
 ---
 
