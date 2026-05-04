@@ -13,7 +13,15 @@ welcal://your-host:3456/cal/<token>                              ← public, saf
 
 
 ```
+## 📸 Screenshots
 
+### 🔐 Admin
+![Admin Login](/images/AdminLogin.png)
+![Admin View](/images/AdminView.png)
+
+### 🌐 Public View
+![Hover Description](/images/PublicHoverDescription.png)
+![Radarr and Sonarr](/images/PublicRadarrandSonarr.png)
 ---
 
 ## 1) Project Overview
