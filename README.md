@@ -24,6 +24,7 @@ Admin View
 ### 🌐 Public View
 Public Hover
 ![Hover Description](/images/PublicHoverDescription.png)
+
 Radarr and Sonarr feeds
 ![Radarr and Sonarr](/images/PublicRadarrandSonarr.png)
 ---
